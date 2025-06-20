@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import datetime
 import contextlib
 import logging
@@ -296,8 +297,8 @@ class MyRpl(PythonRepl):
 
         globals = self.get_globals()
         try:
-            if self._ensure_nvim():
-                globals['__file__'] = self.nvim.current.buffer.name
+            # if self._ensure_nvim():
+                # globals['__file__'] = self.nvim.current.buffer.name
             output = super().eval(line)
             # if output is not None:
             # self.c.print(output)
@@ -412,6 +413,13 @@ class MyRpl(PythonRepl):
             tablename = self.PROJECT_ID + "." + self.DATASET_ID + "." + tablename
         if len(splittable) == 2:
             tablename = self.PROJECT_ID + "." + tablename
+
+
+        tablename = tablename.replace('{{ENV}}', 'dev')
+        tablename = tablename.replace('{{PROJECT_ID}}', self.PROJECT_ID)
+        tablename = tablename.replace('{{DATASET_ID}}', self.DATASET_ID)
+        tablename = tablename.replace('{{DEC_DATASET_ID}}', self.DEC_DATASET_ID)
+        tablename = tablename.replace('{{VOLTAGE_DATASET}}', 'voltage_anbc_hcb_dev')
 
         t = self.client.get_table(tablename)
         print(f'\n{t.reference}\n')
