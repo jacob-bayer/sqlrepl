@@ -68,7 +68,6 @@ pydata-google-auth==1.9.1
 Pygments==2.19.1
 pynvim==0.5.2
 pyperclip==1.9.0
-pysqlrepl @ file:///Users/n856925/Documents/github/pysqlrepl
 pytest==8.3.5
 python-dateutil==2.9.0.post0
 pytz==2025.2

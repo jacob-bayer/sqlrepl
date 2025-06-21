@@ -206,7 +206,7 @@ class MyRpl(PythonRepl):
         self.client = None
         self.PROJECT_ID = ''
         self.DATASET_ID = ''
-        self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_LISTEN_ADDRESS"]
+        self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
         self._ensure_nvim()  # Initialize nvim context
         # self.c = Console()
         # self.get_globals = self.get_globals
@@ -479,10 +479,10 @@ class MyRpl(PythonRepl):
                 self.c.print("\n")
             return
 
-        # if line == "reset_nvim_tries":
-            # self.nvim = None
-            # self._ensure_nvim()
-            # return "Reset nvim tries"
+        if line == "reset_nvim_tries":
+            self.nvim = None
+            self._ensure_nvim()
+            return "Reset nvim tries"
 
         if line.startswith("lookup"):
             self.lookup(line.split()[-1])
