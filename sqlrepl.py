@@ -17,7 +17,11 @@ from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
 
 from pynvim import attach
-import pyperclip as pc
+try:
+    import pyperclip as pc
+    pc.copy("")
+except:
+    pc.copy = lambda x: None
 import pandas as pd
 from decimal import Decimal
 import sqlfluff
@@ -28,10 +32,12 @@ from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.errors import NotRenderableError
-from google.cloud.bigquery import Client, QueryJobConfig, DatasetReference
+import google.cloud.bigquery as bq
+
 
 def enable_logging():
     logging.disable(logging.NOTSET)
+
 
 # pretty.install()
 eastern = ZoneInfo("US/Eastern")
@@ -42,15 +48,16 @@ eastern = ZoneInfo("US/Eastern")
 # database = 'jacobdb.db'
 
 # os.environ['MANPAGER'] ="bat --language=python --theme=Dracula"
-if 'MANPAGER' in os.environ:
-    del os.environ['MANPAGER']
-os.environ['PAGER'] = "less"
+if "MANPAGER" in os.environ:
+    del os.environ["MANPAGER"]
+os.environ["PAGER"] = "less"
+
 
 def help(someobj):
     print(someobj.__doc__)
 
 
-def printdf(dataframe, title="Dataframe", color_by='dtype') -> None:
+def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
     """Display dataframe as table using rich library.
     Args:
         df (pd.DataFrame): dataframe to display
@@ -70,7 +77,7 @@ def printdf(dataframe, title="Dataframe", color_by='dtype') -> None:
     }
 
     rowcolor = False
-    if color_by != 'dtype':
+    if color_by != "dtype":
         colors = {
             str: "blue",
             float: "green",
@@ -85,9 +92,9 @@ def printdf(dataframe, title="Dataframe", color_by='dtype') -> None:
 
     table = Table(title=title)
     dataframe = dataframe.copy()
-    color = ''
+    color = ""
     for col, dtype in dataframe.dtypes.items():
-        if color_by == 'dtype':
+        if color_by == "dtype":
             color = colors.get(str(dtype), "")
         table.add_column(col, header_style=f"bold {color}", style=color)
 
@@ -126,7 +133,7 @@ class MyPrompt(PromptStyle):
 
     def out_prompt(self) -> AnyFormattedText:
         idx = self.python_input.current_statement_index
-        color = 'red'
+        color = "red"
         return HTML(f"<{color}>Result[{idx}]</{color}>: ")
 
 
@@ -137,22 +144,22 @@ class MyRpl(PythonRepl):
         if not os.path.exists(self.NVIM_LISTEN_ADDRESS):
             return False
 
-        new = ''
+        new = ""
         if self.nvim:
             try:
                 self.nvim.current.buffer
                 return True
             except:
                 self.nvim = None
-                new = 'new'
+                new = "new"
 
         if not self.nvim:
             try:
                 self.nvim = attach("socket", path=self.NVIM_LISTEN_ADDRESS)
-                tmux_pane = os.getenv('TMUX_PANE')
+                tmux_pane = os.getenv("TMUX_PANE")
                 print(f"Attached to {new} NVIM")
                 if tmux_pane:
-                    os.system(f"tmux setenv -g TMUX_TARGET_ID '\'{tmux_pane}'\'")
+                    os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
                     self.nvim.api.set_var("tmux_target_id", tmux_pane)
                 return True
             except Exception as e:
@@ -161,12 +168,12 @@ class MyRpl(PythonRepl):
         return False
 
     def __init__(self, debug_mode=False, *args, **kwargs) -> None:
-        kwargs['vi_mode'] = True
-        kwargs['history_filename'] = "/Users/n856925/ptpython_history_sql"
+        kwargs["vi_mode"] = True
+        kwargs["history_filename"] = os.environ["HOME"] + "/ptpython_history_sql"
         super().__init__(*args, **kwargs)
         self.style = "dracula"
         self.debug_mode = debug_mode
-        if os.environ.get('OS_THEME') == 'light':
+        if os.environ.get("OS_THEME") == "light":
             self.style = "default"
         self.use_code_colorscheme(self.style)
         self._lexer = PygmentsLexer(PythonLexer)
@@ -204,15 +211,15 @@ class MyRpl(PythonRepl):
             }
         ]
         self.client = None
-        self.PROJECT_ID = ''
-        self.DATASET_ID = ''
+        self.PROJECT_ID = ""
+        self.DATASET_ID = ""
         self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
         self._ensure_nvim()  # Initialize nvim context
         # self.c = Console()
         # self.get_globals = self.get_globals
         # self.get_locals = self.get_locals
 
-    def _get_bq_client(self) -> tuple[Client, Client]:
+    def _get_bq_client(self) -> tuple[bq.Client, bq.Client]:
 
         print("[blue]Establishing connection to BigQuery")
 
@@ -235,17 +242,17 @@ class MyRpl(PythonRepl):
         except KeyError:
             raise Exception("Please set DATASET_ID, DEC_DATASET_ID in the environment")
 
-        default_dataset = DatasetReference(self.PROJECT_ID, self.DATASET_ID)
-        default_config = QueryJobConfig(default_dataset=default_dataset)
-        dry_run_config = QueryJobConfig(
+        default_dataset = bq.DatasetReference(self.PROJECT_ID, self.DATASET_ID)
+        default_config = bq.QueryJobConfig(default_dataset=default_dataset)
+        dry_run_config = bq.QueryJobConfig(
             default_dataset=default_dataset, dry_run=True, use_query_cache=False
         )
-        client = Client(
+        client = bq.Client(
             project=self.PROJECT_ID,
             credentials=credentials,
             default_query_job_config=default_config,
         )
-        dry_client = Client(
+        dry_client = bq.Client(
             project=self.PROJECT_ID,
             credentials=credentials,
             default_query_job_config=dry_run_config,
@@ -257,7 +264,7 @@ class MyRpl(PythonRepl):
     def llm(self, line: str) -> object:
         print = self.c.print
         self.messages.append({"role": "user", "content": line})
-        full_response = ''
+        full_response = ""
         # think = False
         # counter = 0
         for part in chat("deepseek-r1:7b", stream=True, messages=self.messages):
@@ -275,13 +282,13 @@ class MyRpl(PythonRepl):
 
         new_full_response = []
         for line in full_response.split("\n"):
-            if '```' in line:
+            if "```" in line:
                 line = line.replace(" ", "")
             new_full_response.append(line)
         full_response = "\n".join(new_full_response)
 
         # if full_response:
-        print('\n\n')
+        print("\n\n")
         self.messages += [{"role": "assistant", "content": full_response}]
 
         full_response = Markdown(full_response)
@@ -297,18 +304,18 @@ class MyRpl(PythonRepl):
 
         globals = self.get_globals()
         try:
-            # if self._ensure_nvim():
-                # globals['__file__'] = self.nvim.current.buffer.name
+            if self._ensure_nvim():
+                globals["__file__"] = self.nvim.current.buffer.name
             output = super().eval(line)
             # if output is not None:
             # self.c.print(output)
             return output
         except Exception as e:
-            globals['last_exception'] = e
-            globals['last_frame'] = sys
+            globals["last_exception"] = e
+            globals["last_frame"] = sys
             return e
             # get_console().print_exception(
-                # show_locals=False, suppress=[ptpython], max_frames=10
+            # show_locals=False, suppress=[ptpython], max_frames=10
             # )
 
     def do_sql(self, line: str) -> object:
@@ -320,12 +327,12 @@ class MyRpl(PythonRepl):
         globals = self.get_globals()
 
         query = line
-        query = query.replace('{{ENV}}', 'dev')
-        query = query.replace('{{PROJECT_ID}}', self.PROJECT_ID)
-        query = query.replace('{{DATASET_ID}}', self.DATASET_ID)
-        query = query.replace('{{DEC_DATASET_ID}}', self.DEC_DATASET_ID)
-        query = query.replace('{{VOLTAGE_DATASET}}', 'voltage_anbc_hcb_dev')
-        query = sqlfluff.fix(query, config_path='/Users/n856925/.sqlfluff')
+        query = query.replace("{{ENV}}", "dev")
+        query = query.replace("{{PROJECT_ID}}", self.PROJECT_ID)
+        query = query.replace("{{DATASET_ID}}", self.DATASET_ID)
+        query = query.replace("{{DEC_DATASET_ID}}", self.DEC_DATASET_ID)
+        query = query.replace("{{VOLTAGE_DATASET}}", "voltage_anbc_hcb_dev")
+        query = sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
         syntax = Syntax(query, "googlesql", theme=self.style, line_numbers=True)
         print(syntax)
         try:
@@ -346,12 +353,12 @@ class MyRpl(PythonRepl):
         is_select = line.startswith(("SELECT", "WITH"))
         if is_select:
             # df = query_job.to_dataframe()
-            globals['rows'] = []
-            globals['dictrows'] = []
+            globals["rows"] = []
+            globals["dictrows"] = []
             for row in tqdm(res, total=res.total_rows):
-                globals['rows'].append(row)
-                globals['dictrows'].append(dict(row))
-            df = pd.DataFrame(globals['dictrows'])
+                globals["rows"].append(row)
+                globals["dictrows"].append(dict(row))
+            df = pd.DataFrame(globals["dictrows"])
 
             rows, cols = df.shape
             if rows == 1:
@@ -359,12 +366,12 @@ class MyRpl(PythonRepl):
             elif cols > 10:
                 print(df.head(10))
             else:
-                print('\n')
+                print("\n")
                 printdf(df.head(20))
                 # print(Markdown(df.to_markdown()))
                 print("\n")
             # globals["df"] = self.d.data = df
-            globals['df'] = df
+            globals["df"] = df
             self.dfs.append(df)
             globals["dfs"] = self.dfs
             return f"Returned {rows} rows, {cols} cols"
@@ -375,8 +382,10 @@ class MyRpl(PythonRepl):
         globals = self.get_globals()
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
-        globals['bqjobs'] = list(self.client.list_jobs(max_results=20))
-        globals['running_jobs'] = rj = list(self.client.list_jobs(state_filter='running'))
+        globals["bqjobs"] = list(self.client.list_jobs(max_results=20))
+        globals["running_jobs"] = rj = list(
+            self.client.list_jobs(state_filter="running")
+        )
         if rj:
             return "There are running jobs. Check `running_jobs`"
 
@@ -422,14 +431,18 @@ class MyRpl(PythonRepl):
         tablename = tablename.replace('{{VOLTAGE_DATASET}}', 'voltage_anbc_hcb_dev')
 
         t = self.client.get_table(tablename)
-        print(f'\n{t.reference}\n')
-        print(f'Type: {t.table_type}')
+        print(f"\n{t.reference}\n")
+        print(f"Type: {t.table_type}")
         if t.view_query:
-            viewquery = sqlfluff.fix(t.view_query, config_path='/Users/n856925/.sqlfluff')
-            highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
-            print(f':\n', highlighted, '\n')
+            viewquery = sqlfluff.fix(
+                t.view_query, config_path="/Users/n856925/.sqlfluff"
+            )
+            highlighted = Syntax(
+                viewquery, "googlesql", theme=self.style, line_numbers=True
+            )
+            print(f":\n", highlighted, "\n")
         else:
-            print(f'{t.num_rows} rows')
+            print(f"{t.num_rows} rows")
         print("Columns")
         colors = {
             "NUMERIC": "blue",
@@ -447,16 +460,17 @@ class MyRpl(PythonRepl):
         print("\n")
 
         if t.modified:
-            modified = t.modified.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
-            print(f'Modified at: {modified}')
+            modified = t.modified.astimezone(eastern).strftime(
+                "%Y-%m-%d %I:%M:%S %p ET"
+            )
+            print(f"Modified at: {modified}")
         if t.created:
             created = t.created.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
-            print(f'Created at: {created}')
+            print(f"Created at: {created}")
 
         globals = self.get_globals()
-        globals['t'] = t
+        globals["t"] = t
         print("\nTable object is globally assigned to `t` for exploration\n")
-
 
     def eval(self, line: str) -> object:
 
@@ -466,9 +480,9 @@ class MyRpl(PythonRepl):
 
         if line == "help":
             allcommands = ["checkrunning", "sql", "python"]
-            self.c.print("Commands:\n", '\n'.join(allcommands))
+            self.c.print("Commands:\n", "\n".join(allcommands))
 
-        if line in ["checkrunning", 'getjobs']:
+        if line in ["checkrunning", "getjobs"]:
             return self._checkrunning()
 
         if line == "llm history":
@@ -516,7 +530,8 @@ class MyRpl(PythonRepl):
                     raise output
                 except Exception as e:
                     get_console().print_exception(
-                        show_locals=False, suppress=[ptpython], max_frames=10)
+                        show_locals=False, suppress=[ptpython], max_frames=10
+                    )
                 return
             print(output)
 
@@ -569,11 +584,11 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
     # https://github.com/prompt-toolkit/ptpython/blob/5021832f76309755097b744f274c4e687a690b85/ptpython/key_bindings.py
     @repl.add_key_binding("c-y")
     def _(event) -> None:
-        os.system('tmux copy-mode')
+        os.system("tmux copy-mode")
 
     @repl.add_key_binding("c-u")
     def _(event) -> None:
-        os.system('tmux copy-mode')
+        os.system("tmux copy-mode")
 
     # press gf to go to the file under cursor
     # '/Users/n856925/Documents/github/ptpython/ptpython/key_bindings.py'
@@ -590,7 +605,9 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
     @repl.add_key_binding("B", filter=ViNavigationMode())
     def _(event) -> None:
         b = event.current_buffer
-        b.cursor_position += b.document.get_start_of_line_position(after_whitespace=True)
+        b.cursor_position += b.document.get_start_of_line_position(
+            after_whitespace=True
+        )
 
     @repl.add_key_binding("c-space")
     def _(event) -> None:
