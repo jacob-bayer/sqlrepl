@@ -397,9 +397,6 @@ class MyRpl(PythonRepl):
         if filetype == self.prompt_style:
             return
 
-        if self.debug_mode:
-            return f"Cannot switch to {filetype} from debug mode"
-
         if filetype == "sql":
             self.prompt_style = "sql"
             self._lexer = PygmentsLexer(GoogleSqlLexer)
@@ -558,8 +555,8 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
             return {}
         return parent_locals
 
-    if not debug_mode:
-        logging.disable()
+    # if not debug_mode:
+        # logging.disable()
 
     # Create REPL.
     repl = MyRpl(debug_mode=debug_mode, get_globals=get_globals, get_locals=get_locals)
