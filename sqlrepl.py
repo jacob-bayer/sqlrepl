@@ -1,11 +1,9 @@
 import os
 import sys
-import json
 from datetime import datetime, date
 import contextlib
 import logging
 from tqdm import tqdm
-from ollama import chat
 from prompt_toolkit.filters import ViNavigationMode
 from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
@@ -133,7 +131,6 @@ class MyPrompt(PromptStyle):
         colors = {
             "SQL   ": "ansiblue",
             "Python": "ansigreen",
-            "LLM": "ansiyellow",
             "Debug": "ansired",
         }
         self.color = colors.get(prompt_title, "ansiblue")
@@ -194,7 +191,6 @@ class MyRpl(PythonRepl):
         self._lexer = PygmentsLexer(PythonLexer)
         self.all_prompt_styles["sql"] = MyPrompt(self, "SQL")
         self.all_prompt_styles["python"] = MyPrompt(self, "Python")
-        self.all_prompt_styles["llm"] = MyPrompt(self, "LLM")
         if self.debug_mode:
             self.all_prompt_styles["python"] = MyPrompt(self, "Debug")
         self.prompt_style = "python"
@@ -275,45 +271,6 @@ class MyRpl(PythonRepl):
         print("[green]Connected to BigQuery")
 
         return client, dry_client
-
-    def llm(self, line: str) -> object:
-        print = self.c.print
-        self.messages.append({"role": "user", "content": line})
-        full_response = ""
-        # think = False
-        # counter = 0
-        for part in chat("deepseek-r1:7b", stream=True, messages=self.messages):
-            response = part["message"]["content"]
-            # ishtml = response.startswith("<") and response.endswith(">")
-            # if ishtml:
-            #     think = response == '<think>'
-            #     response = ""
-            #     if think:
-            #         self.c.rule("[bold red]Thinking...")
-            #     else:
-            #         self.c.rule("[bold red]")
-            print(response, end="")
-            full_response += response
-
-        new_full_response = []
-        for line in full_response.split("\n"):
-            if "```" in line:
-                line = line.replace(" ", "")
-            new_full_response.append(line)
-        full_response = "\n".join(new_full_response)
-
-        # if full_response:
-        print("\n\n")
-        self.messages += [{"role": "assistant", "content": full_response}]
-
-        full_response = Markdown(full_response)
-
-        for token in full_response.parsed:
-            if token.tag == "code":
-                pc.copy(token.content)
-
-        self.c.rule("[bold red]Assistant")
-        return full_response
 
     def do_python(self, line: str):
 
@@ -419,7 +376,7 @@ class MyRpl(PythonRepl):
 
     def handle_choice(self, filetype):
 
-        if filetype not in ["sql", "python", "llm"]:
+        if filetype not in ["sql", "python"]:
             return
 
         if filetype == self.prompt_style:
@@ -428,10 +385,6 @@ class MyRpl(PythonRepl):
         if filetype == "sql":
             self.prompt_style = "sql"
             self._lexer = PygmentsLexer(GoogleSqlLexer)
-
-        if filetype == "llm":
-            self.prompt_style = "llm"
-            self._lexer = None
 
         if filetype == "python":
             self.prompt_style = "python"
@@ -509,14 +462,6 @@ class MyRpl(PythonRepl):
         if line in ["checkrunning", "getjobs"]:
             return self._checkrunning()
 
-        if line == "llm history":
-            for message in self.messages:
-                self.c.print("\n")
-                self.c.rule(f"[bold red]{message['role']}")
-                self.c.print(Markdown(message["content"]), highlight=True)
-                self.c.print("\n")
-            return
-
         if line == "reset_nvim_tries":
             self.nvim = None
             self._ensure_nvim()
@@ -540,23 +485,23 @@ class MyRpl(PythonRepl):
 
         if issql:
             self.handle_choice("sql")
-        elif not self.prompt_style == "llm":
+        else:
             self.handle_choice("python")
 
-        dofunc = {"sql": self.do_sql, "llm": self.llm, "python": self.do_python}
+        dofunc = {"sql": self.do_sql, "python": self.do_python}
         output = dofunc[self.prompt_style](line)
         has_output = output is not None
         # The best strategy would be to learn how self.style_transformations works in conjunction
         # with the parent class output printer.
         if has_output:
             if isinstance(output, Exception):
-                raise output
-                # try:
-                    # raise output
-                # except Exception as e:
-                    # get_console().print_exception(
-                        # show_locals=False, suppress=[ptpython], max_frames=10
-                    # )
+                # raise output
+                try:
+                    raise output
+                except Exception as e:
+                    get_console().print_exception(
+                        show_locals=False, suppress=[ptpython], max_frames=10
+                    )
                 return
             print(output)
 
