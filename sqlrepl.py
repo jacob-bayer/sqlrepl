@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-import datetime
+from datetime import datetime, date
 import contextlib
 import logging
 from tqdm import tqdm
@@ -15,14 +15,28 @@ import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
+# from prompt_toolkit.patch_stdout import patch_stdout as patch_stdout_context
+
+log = logging.getLogger("sqlrepl")
 
 from pynvim import attach
+
 try:
-    import pyperclip as pc
+    import pyperclip as pc  # pyright: ignore
+
     pc.copy("")
 except:
-    pc.copy = lambda x: None
+
+    class pc:
+        @classmethod
+        def copy(self, something):
+            log.warning("pyperclip failed to import. Nothing copied.")
+            return None
+
+
 import pandas as pd
+
+pd.options.display.max_rows = 4000
 from decimal import Decimal
 import sqlfluff
 from zoneinfo import ZoneInfo
@@ -33,6 +47,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.errors import NotRenderableError
 import google.cloud.bigquery as bq
+from google.api_core.exceptions import GoogleAPICallError
 
 
 def enable_logging():
@@ -83,8 +98,8 @@ def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
             float: "green",
             int: "magenta",
             bool: "cyan",
-            datetime.date: "yellow",
-            datetime.datetime: "yellow",
+            date: "yellow",
+            datetime: "yellow",
             pd.Timestamp: "yellow",
             Decimal: "green",
         }
@@ -304,8 +319,9 @@ class MyRpl(PythonRepl):
 
         globals = self.get_globals()
         try:
-            if self._ensure_nvim():
-                globals["__file__"] = self.nvim.current.buffer.name
+            # if self._ensure_nvim():
+                # This causes an issue with dask distributed unless it's protected by __name__==__main__
+                # globals["__file__"] = self.nvim.current.buffer.name
             output = super().eval(line)
             # if output is not None:
             # self.c.print(output)
@@ -335,20 +351,32 @@ class MyRpl(PythonRepl):
         query = sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
         syntax = Syntax(query, "googlesql", theme=self.style, line_numbers=True)
         print(syntax)
+
         try:
             query_job = self.dry_client.query(query)
             bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
-            print("Estimated: ", bytes_billed, "GB billed")
+            print("Est: ", bytes_billed, "GB")
         except Exception as e:
             print(f"\n{e}")
             return
         print("[yellow]Working...")
         query_job = self.client.query(query)
-        res = query_job.result()
+
+        # This is only necessary because failed assertions are not caught by the dry run
+        # and will raise an exception when the query is run. (A 400 Bad Request for some reason)
+        try:
+            res = query_job.result()
+        except GoogleAPICallError as e:
+            if query_job.statement_type == "ASSERT":
+                print("\n[red]BIGQUERY ASSERTION ERROR:")
+                print(f"{e.errors[0]['message']}\n")
+                return
+            print(f"\nError: {e}\n")
+            return
 
         pc.copy(query)
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
-        print("Actual: ", bytes_billed, "GB billed")
+        print("Actual: ", bytes_billed, "GB")
         # client.query_and_wait is also an option
         is_select = line.startswith(("SELECT", "WITH"))
         if is_select:
@@ -420,12 +448,11 @@ class MyRpl(PythonRepl):
         if len(splittable) == 2:
             tablename = self.PROJECT_ID + "." + tablename
 
-
-        tablename = tablename.replace('{{ENV}}', 'dev')
-        tablename = tablename.replace('{{PROJECT_ID}}', self.PROJECT_ID)
-        tablename = tablename.replace('{{DATASET_ID}}', self.DATASET_ID)
-        tablename = tablename.replace('{{DEC_DATASET_ID}}', self.DEC_DATASET_ID)
-        tablename = tablename.replace('{{VOLTAGE_DATASET}}', 'voltage_anbc_hcb_dev')
+        tablename = tablename.replace("{{ENV}}", "dev")
+        tablename = tablename.replace("{{PROJECT_ID}}", self.PROJECT_ID)
+        tablename = tablename.replace("{{DATASET_ID}}", self.DATASET_ID)
+        tablename = tablename.replace("{{DEC_DATASET_ID}}", self.DEC_DATASET_ID)
+        tablename = tablename.replace("{{VOLTAGE_DATASET}}", "voltage_anbc_hcb_dev")
 
         t = self.client.get_table(tablename)
         print(f"\n{t.reference}\n")
@@ -496,7 +523,7 @@ class MyRpl(PythonRepl):
             return "Reset nvim tries"
 
         if line.startswith("lookup"):
-            self.lookup(line.split()[-1])
+            self.lookup(line.split()[-1].replace("`", ""))
             return
 
         issql = line.split()[0] in [
@@ -523,12 +550,13 @@ class MyRpl(PythonRepl):
         # with the parent class output printer.
         if has_output:
             if isinstance(output, Exception):
-                try:
-                    raise output
-                except Exception as e:
-                    get_console().print_exception(
-                        show_locals=False, suppress=[ptpython], max_frames=10
-                    )
+                raise output
+                # try:
+                    # raise output
+                # except Exception as e:
+                    # get_console().print_exception(
+                        # show_locals=False, suppress=[ptpython], max_frames=10
+                    # )
                 return
             print(output)
 
@@ -543,7 +571,12 @@ class MyRpl(PythonRepl):
 # Otherwise it doesn't work.
 
 
-def embed(debug_mode=True, parent_globals=None, parent_locals=None):
+def embed(
+    debug_mode=True,
+    parent_globals=None,
+    parent_locals=None,
+    return_asyncio_coroutine=False,
+):
 
     def get_globals():
         if parent_globals is None:
@@ -556,7 +589,7 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
         return parent_locals
 
     # if not debug_mode:
-        # logging.disable()
+    # logging.disable()
 
     # Create REPL.
     repl = MyRpl(debug_mode=debug_mode, get_globals=get_globals, get_locals=get_locals)
@@ -566,6 +599,12 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
         event.current_buffer.cursor_position += (
             event.current_buffer.document.get_end_of_line_position()
         )
+
+    # @repl.add_key_binding("f8")
+    # def _(event) -> None:
+    #     if event.app.current_buffer.text:
+    #         breakpoint()
+    #         event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
 
     # To debug events do this ( if in the repl, do get_globals = globals )
     # globals = get_globals()
@@ -617,8 +656,27 @@ def embed(debug_mode=True, parent_globals=None, parent_locals=None):
         if suggestion:
             b.insert_text(suggestion.text)
 
+    # Start repl.
+    # patch_context = patch_stdout_context()
+    #
+    # if return_asyncio_coroutine:
+    #
+    #     async def coroutine() -> None:
+    #         with patch_context:
+    #             await repl.run_async()
+    #
+    #     return coroutine()  # type: ignore
+    # else:
     repl.run()
+        # return None
 
 
 if __name__ == "__main__":
-    embed(debug_mode=False, parent_globals=globals(), parent_locals=locals())
+    embed(
+        debug_mode=False,
+        parent_globals=globals(),
+        parent_locals=locals(),
+        return_asyncio_coroutine=False,
+    )
+    # if x:
+        # asyncio.run(x)  # type: ignore
