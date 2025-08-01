@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from datetime import datetime, date
 import contextlib
 import logging
@@ -13,11 +14,20 @@ import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
-# from prompt_toolkit.patch_stdout import patch_stdout as patch_stdout_context
+from sqlrepl.status_bar import status_bar
+from sqlrepl.style import mystyle
+import click
+
+
+# venv = os.getenv("VIRTUAL_ENV")
+# sys.path
+# if venv:
+# sys.path.insert(1, venv + "/lib/python3.11/site-packages")
+
 
 log = logging.getLogger("sqlrepl")
 
-from pynvim import attach
+# from pynvim import attach
 
 try:
     import pyperclip as pc  # pyright: ignore
@@ -27,7 +37,7 @@ except:
 
     class pc:
         @classmethod
-        def copy(self, something):
+        def copy(cls, something):
             log.warning("pyperclip failed to import. Nothing copied.")
             return None
 
@@ -48,17 +58,8 @@ import google.cloud.bigquery as bq
 from google.api_core.exceptions import GoogleAPICallError
 
 
-def enable_logging():
-    logging.disable(logging.NOTSET)
-
-
 # pretty.install()
 eastern = ZoneInfo("US/Eastern")
-
-
-# import sqlite3
-
-# database = 'jacobdb.db'
 
 # os.environ['MANPAGER'] ="bat --language=python --theme=Dracula"
 if "MANPAGER" in os.environ:
@@ -129,16 +130,18 @@ class MyPrompt(PromptStyle):
         self.python_input = python_input
         self.prompt_title = prompt_title
         colors = {
-            "SQL   ": "ansiblue",
-            "Python": "ansigreen",
+            "SQL": "ansiblue",
+            "Py": "ansigreen",
             "Debug": "ansired",
+            "Async": "ansired",
+            "DebugAsync": "ansired",
         }
         self.color = colors.get(prompt_title, "ansiblue")
 
     def in_prompt(self) -> AnyFormattedText:
         idx = self.python_input.current_statement_index
         title = self.prompt_title
-        return HTML(f"<{self.color}>{title}[{idx}]</{self.color}>: ")
+        return HTML(f"<{self.color}>{title} [{idx}]</{self.color}>: ")
 
     def in2_prompt(self, width: int) -> AnyFormattedText:
         return "...: ".rjust(width)
@@ -146,57 +149,92 @@ class MyPrompt(PromptStyle):
     def out_prompt(self) -> AnyFormattedText:
         idx = self.python_input.current_statement_index
         color = "red"
-        return HTML(f"<{color}>Result[{idx}]</{color}>: ")
+        return HTML(f"<{color}>Result [{idx}]</{color}>: ")
 
 
 class MyRpl(PythonRepl):
 
-    def _ensure_nvim(self) -> bool:
-        print = self.c.print
-        if not os.path.exists(self.NVIM_LISTEN_ADDRESS):
-            return False
+    # def _ensure_nvim(self) -> bool:
+    #     print = self.c.print
+    #     if not os.path.exists(self.NVIM_LISTEN_ADDRESS):
+    #         return False
+    #
+    #     new = ""
+    #     if self.nvim:
+    #         try:
+    #             self.nvim.current.buffer
+    #             return True
+    #         except:
+    #             self.nvim = None
+    #             new = "new"
+    #
+    #     if not self.nvim:
+    #         try:
+    #             self.nvim = attach("socket", path=self.NVIM_LISTEN_ADDRESS)
+    #             tmux_pane = os.getenv("TMUX_PANE")
+    #             print(f"Attached to {new} NVIM")
+    #             if tmux_pane:
+    #                 os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
+    #                 self.nvim.api.set_var("tmux_target_id", tmux_pane)
+    #             return True
+    #         except Exception as e:
+    #             print("Error attaching to nvim:", e)
+    #
+    #     return False
 
-        new = ""
-        if self.nvim:
-            try:
-                self.nvim.current.buffer
-                return True
-            except:
-                self.nvim = None
-                new = "new"
-
-        if not self.nvim:
-            try:
-                self.nvim = attach("socket", path=self.NVIM_LISTEN_ADDRESS)
-                tmux_pane = os.getenv("TMUX_PANE")
-                print(f"Attached to {new} NVIM")
-                if tmux_pane:
-                    os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
-                    self.nvim.api.set_var("tmux_target_id", tmux_pane)
-                return True
-            except Exception as e:
-                print("Error attaching to nvim:", e)
-
-        return False
-
-    def __init__(self, debug_mode=False, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        title: str | None = None,
+        debug_mode: bool = False,
+        is_async: bool = False,
+        *args,
+        **kwargs,
+    ) -> None:
         kwargs["vi_mode"] = True
         kwargs["history_filename"] = os.environ["HOME"] + "/ptpython_history_sql"
+        kwargs["_extra_toolbars"] = [status_bar(self)]
         super().__init__(*args, **kwargs)
-        self.style = "dracula"
         self.debug_mode = debug_mode
+        self.async_loop = is_async
+        self.async_debug = self.debug_mode and self.async_loop
+        self.title = title or "SqlRepl"
+        self.show_custom_status_bar = title
+        self.style = "dracula"
         if os.environ.get("OS_THEME") == "light":
             self.style = "default"
         self.use_code_colorscheme(self.style)
+
+        self.ui_styles = {"default": mystyle}
+        self.use_ui_colorscheme("default")
+
         self._lexer = PygmentsLexer(PythonLexer)
+        # self._extra_toolbars = [status_bar(self)]
+        # self.ptpython_layout = PtPythonLayout(
+        # self,
+        # lexer=DynamicLexer(
+        # lambda: self._lexer
+        # if self.enable_syntax_highlighting
+        # else SimpleLexer()
+        # ),
+        # input_buffer_height=self._input_buffer_height,
+        # extra_buffer_processors=self._extra_buffer_processors,
+        # extra_body=self._extra_layout_body,
+        # extra_toolbars=self._extra_toolbars,
+        # )
         self.all_prompt_styles["sql"] = MyPrompt(self, "SQL")
-        self.all_prompt_styles["python"] = MyPrompt(self, "Python")
+        self.all_prompt_styles["python"] = MyPrompt(self, "Py")
         if self.debug_mode:
             self.all_prompt_styles["python"] = MyPrompt(self, "Debug")
+        if self.async_loop:
+            self.all_prompt_styles["python"] = MyPrompt(self, "Async")
+        if self.async_debug:
+            self.all_prompt_styles["python"] = MyPrompt(self, "DebugAsync")
         self.prompt_style = "python"
         self.confirm_exit = True
         self.enable_input_validation = False
         self.show_docstring = True
+        self.show_status_bar = False
+        self.ptpython_layout.status_bar = status_bar
         # self.clipboard = PyperclipClipboard()
         self.terminal_title = "OMREPL"
         self.enable_open_in_editor = False
@@ -215,17 +253,11 @@ class MyRpl(PythonRepl):
         self.cursor_shape_config = "Modal (vi)"
         self.nvim = None
         self.dfs = []
-        self.messages = [
-            {
-                "role": "system",
-                "content": "You are a code expert. If you respond to the user with a code snippet, denote this using three backticks followed by the language (ex: ```python\n\nimport os\n```",
-            }
-        ]
         self.client = None
         self.PROJECT_ID = ""
         self.DATASET_ID = ""
-        self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
-        self._ensure_nvim()  # Initialize nvim context
+        # self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
+        # self._ensure_nvim()  # Initialize nvim context
         # self.c = Console()
         # self.get_globals = self.get_globals
         # self.get_locals = self.get_locals
@@ -277,8 +309,8 @@ class MyRpl(PythonRepl):
         globals = self.get_globals()
         try:
             # if self._ensure_nvim():
-                # This causes an issue with dask distributed unless it's protected by __name__==__main__
-                # globals["__file__"] = self.nvim.current.buffer.name
+            # This causes an issue with dask distributed unless it's protected by __name__==__main__
+            # globals["__file__"] = self.nvim.current.buffer.name
             output = super().eval(line)
             # if output is not None:
             # self.c.print(output)
@@ -449,6 +481,15 @@ class MyRpl(PythonRepl):
         globals["t"] = t
         print("\nTable object is globally assigned to `t` for exploration\n")
 
+    async def eval_async(self, line: str) -> object:
+        try:
+            x = await super().eval_async(line)
+            sys.stdout.flush()
+            if x:
+                print(x)
+        except Exception as e:
+            log.exception(e)
+
     def eval(self, line: str) -> object:
 
         choice = self.handle_choice(line)
@@ -464,7 +505,7 @@ class MyRpl(PythonRepl):
 
         if line == "reset_nvim_tries":
             self.nvim = None
-            self._ensure_nvim()
+            # self._ensure_nvim()
             return "Reset nvim tries"
 
         if line.startswith("lookup"):
@@ -511,33 +552,44 @@ class MyRpl(PythonRepl):
         # else:
         # return output
 
+    def _remove_from_namespace(self):
+        # Idk what this is supposed to be for but it causes issues
+        pass
+
 
 # The globals and locals have to be set up exactly this way. Exactly nested.
 # Otherwise it doesn't work.
 
 
 def embed(
-    debug_mode=True,
+    debug_mode=False,
+    title=None,
     parent_globals=None,
     parent_locals=None,
     return_asyncio_coroutine=False,
 ):
 
+    myglobals = parent_globals or globals()
+    mylocals = parent_locals or locals()
+
+
     def get_globals():
-        if parent_globals is None:
-            return {}
-        return parent_globals
+        return myglobals
 
     def get_locals():
-        if parent_locals is None:
-            return {}
-        return parent_locals
+        return mylocals
 
     # if not debug_mode:
     # logging.disable()
 
     # Create REPL.
-    repl = MyRpl(debug_mode=debug_mode, get_globals=get_globals, get_locals=get_locals)
+    repl = MyRpl(
+        title=title,
+        debug_mode=debug_mode,
+        get_globals=get_globals,
+        get_locals=get_locals,
+        is_async=return_asyncio_coroutine,
+    )
 
     @repl.add_key_binding("E", filter=ViNavigationMode())
     def _(event) -> None:
@@ -545,11 +597,11 @@ def embed(
             event.current_buffer.document.get_end_of_line_position()
         )
 
-    # @repl.add_key_binding("f8")
-    # def _(event) -> None:
-    #     if event.app.current_buffer.text:
-    #         breakpoint()
-    #         event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+    @repl.add_key_binding("f8")
+    def _(event) -> None:
+        if event.app.current_buffer.text:
+            breakpoint()
+            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
 
     # To debug events do this ( if in the repl, do get_globals = globals )
     # globals = get_globals()
@@ -601,27 +653,57 @@ def embed(
         if suggestion:
             b.insert_text(suggestion.text)
 
-    # Start repl.
-    # patch_context = patch_stdout_context()
-    #
-    # if return_asyncio_coroutine:
-    #
-    #     async def coroutine() -> None:
-    #         with patch_context:
-    #             await repl.run_async()
-    #
-    #     return coroutine()  # type: ignore
-    # else:
-    repl.run()
-        # return None
+    if return_asyncio_coroutine:
+
+        async def coroutine() -> None:
+            await repl.run_async()
+
+        log.debug("Returning asyncio coroutine")
+        return coroutine()  # type: ignore
+    else:
+        repl.run()
+        return None
+
+
+async def run_asyncio_coroutine(coro):
+    """
+    Run an asyncio coroutine in the event loop.
+    """
+    await coro
+
+top_globals = globals()
+top_locals = locals()
+
+@click.command()
+@click.option("--run_async", is_flag=True, help="Async")
+@click.option("--verbose", is_flag=True, help="Debug mode")
+def cli(run_async, verbose):
+    """Command-line interface for the embed function."""
+
+    # stdout bc otherwise there's softwrap
+    real_sitepackages = os.popen(
+        "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
+    ).read()
+
+    print(f"Real site-packages: {real_sitepackages.strip()}")
+    sys.path.insert(0, real_sitepackages)
+    try:
+        import sitecustomize  # not automatic through pipx venv
+    except ImportError:
+        pass
+
+
+    log = logging.getLogger()
+    if verbose:
+        log.setLevel(logging.DEBUG)
+    coroutine = embed(
+        parent_globals=top_globals,
+        parent_locals=top_locals,
+        return_asyncio_coroutine=run_async,
+    )
+    if coroutine:
+        asyncio.run(run_asyncio_coroutine(coroutine))
 
 
 if __name__ == "__main__":
-    embed(
-        debug_mode=False,
-        parent_globals=globals(),
-        parent_locals=locals(),
-        return_asyncio_coroutine=False,
-    )
-    # if x:
-        # asyncio.run(x)  # type: ignore
+    cli()

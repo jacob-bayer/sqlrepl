@@ -1,0 +1,21 @@
+[project]
+name = "sqlrepl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-cloud-bigquery>=3.35.1",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "prompt-toolkit>=3.0.51",
+    "ptpython>=3.0.30",
+    "pyperclip>=1.9.0",
+    "rich>=14.1.0",
+    "sqlfluff>=3.4.2",
+    "sqlglot>=27.5.1",
+    "tqdm>=4.67.1",
+]
+
+[project.scripts]
+sqlrepl = "sqlrepl:cli"
