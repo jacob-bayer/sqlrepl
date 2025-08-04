@@ -43,10 +43,29 @@ except:
 
 
 import pandas as pd
+import numpy as np
 
 pd.options.display.max_rows = 4000
 from decimal import Decimal
 import sqlfluff
+
+logging.getLogger("sqlfluff").setLevel(logging.WARNING)
+
+jinja_params = dict(
+    ENV="dev",
+    PROJECT_ID=os.environ["PROJECT_ID"],
+    DATASET_ID=os.environ["DATASET_ID"],
+    DEC_DATASET_ID=os.environ["DEC_DATASET_ID"],
+    VOLTAGE_DATASET="voltage_anbc_hcb_dev",
+)
+
+
+def format_fix(query):
+    for key, value in jinja_params.items():
+        query = query.replace("{{" + key + "}}", value)
+    return sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
+
+
 from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
 from rich.console import Console
@@ -254,8 +273,8 @@ class MyRpl(PythonRepl):
         self.nvim = None
         self.dfs = []
         self.client = None
-        self.PROJECT_ID = ""
-        self.DATASET_ID = ""
+        self.PROJECT_ID = jinja_params["PROJECT_ID"]
+        self.DATASET_ID = jinja_params["DATASET_ID"]
         # self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
         # self._ensure_nvim()  # Initialize nvim context
         # self.c = Console()
@@ -269,21 +288,7 @@ class MyRpl(PythonRepl):
         # Instantiating client does this step anyway so it doesnt add any extra time
         from google.auth import default
 
-        credentials, project = default()
-
-        # Use PROJECT_ID env var if set, otherwise project from credentials
-        PROJECT_ID = os.getenv("PROJECT_ID", project)
-        if not PROJECT_ID:
-            raise Exception("Please set DATASET_ID, DEC_DATASET_ID in the environment")
-        if isinstance(PROJECT_ID, str):
-            self.PROJECT_ID = PROJECT_ID
-            print("[blue]Project ID:", self.PROJECT_ID)
-
-        try:
-            self.DATASET_ID = os.environ["DATASET_ID"]
-            self.DEC_DATASET_ID = os.environ["DEC_DATASET_ID"]
-        except KeyError:
-            raise Exception("Please set DATASET_ID, DEC_DATASET_ID in the environment")
+        credentials, _ = default()
 
         default_dataset = bq.DatasetReference(self.PROJECT_ID, self.DATASET_ID)
         default_config = bq.QueryJobConfig(default_dataset=default_dataset)
@@ -312,16 +317,13 @@ class MyRpl(PythonRepl):
             # This causes an issue with dask distributed unless it's protected by __name__==__main__
             # globals["__file__"] = self.nvim.current.buffer.name
             output = super().eval(line)
-            # if output is not None:
-            # self.c.print(output)
             return output
         except Exception as e:
             globals["last_exception"] = e
             globals["last_frame"] = sys
-            return e
-            # get_console().print_exception(
-            # show_locals=False, suppress=[ptpython], max_frames=10
-            # )
+            get_console().print_exception(
+                show_locals=False, suppress=[ptpython], max_frames=10
+            )
 
     def do_sql(self, line: str) -> object:
         if not self.client:
@@ -331,13 +333,7 @@ class MyRpl(PythonRepl):
 
         globals = self.get_globals()
 
-        query = line
-        query = query.replace("{{ENV}}", "dev")
-        query = query.replace("{{PROJECT_ID}}", self.PROJECT_ID)
-        query = query.replace("{{DATASET_ID}}", self.DATASET_ID)
-        query = query.replace("{{DEC_DATASET_ID}}", self.DEC_DATASET_ID)
-        query = query.replace("{{VOLTAGE_DATASET}}", "voltage_anbc_hcb_dev")
-        query = sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
+        query = format_fix(line)
         syntax = Syntax(query, "googlesql", theme=self.style, line_numbers=True)
         print(syntax)
 
@@ -433,19 +429,14 @@ class MyRpl(PythonRepl):
         if len(splittable) == 2:
             tablename = self.PROJECT_ID + "." + tablename
 
-        tablename = tablename.replace("{{ENV}}", "dev")
-        tablename = tablename.replace("{{PROJECT_ID}}", self.PROJECT_ID)
-        tablename = tablename.replace("{{DATASET_ID}}", self.DATASET_ID)
-        tablename = tablename.replace("{{DEC_DATASET_ID}}", self.DEC_DATASET_ID)
-        tablename = tablename.replace("{{VOLTAGE_DATASET}}", "voltage_anbc_hcb_dev")
+        for key, value in jinja_params.items():
+            tablename = tablename.replace("{{" + key + "}}", value)
 
         t = self.client.get_table(tablename)
         print(f"\n{t.reference}\n")
         print(f"Type: {t.table_type}")
         if t.view_query:
-            viewquery = sqlfluff.fix(
-                t.view_query, config_path="/Users/n856925/.sqlfluff"
-            )
+            viewquery = format_fix(t.view_query)
             highlighted = Syntax(
                 viewquery, "googlesql", theme=self.style, line_numbers=True
             )
@@ -541,7 +532,10 @@ class MyRpl(PythonRepl):
                     raise output
                 except Exception as e:
                     get_console().print_exception(
-                        show_locals=False, suppress=[ptpython], max_frames=10
+                        show_locals=False,
+                        suppress=[ptpython],
+                        max_frames=10,
+                        extra_lines=10,
                     )
                 return
             print(output)
