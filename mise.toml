@@ -1,0 +1,9 @@
+# [settings]
+# python.uv_venv_auto = true
+
+# [tools]
+# python = "3.11.11"
+
+[env]
+_.python.venv = { path = ".venv" }
+

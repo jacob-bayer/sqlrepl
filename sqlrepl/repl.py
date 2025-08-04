@@ -476,7 +476,7 @@ class MyRpl(PythonRepl):
         try:
             x = await super().eval_async(line)
             sys.stdout.flush()
-            if x:
+            if x is not None:
                 print(x)
         except Exception as e:
             log.exception(e)
