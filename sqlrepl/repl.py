@@ -81,10 +81,11 @@ from google.api_core.exceptions import GoogleAPICallError
 # pretty.install()
 eastern = ZoneInfo("US/Eastern")
 
-os.environ['MANPAGER'] ="bat --language=py -p"
+os.environ["MANPAGER"] = "bat --language=py -p"
 # if "MANPAGER" in os.environ:
-    # del os.environ["MANPAGER"]
+# del os.environ["MANPAGER"]
 os.environ["PAGER"] = "bat --language=py -p"
+
 
 def help(someobj: object) -> str | None:
     # docstring = someobj.__doc__
@@ -108,6 +109,8 @@ def help(someobj: object) -> str | None:
     c = get_console()
     with c.pager():
         c.print(someobj.__doc__, highlight=False, markup=True)
+
+
 #     return result
 
 
@@ -686,10 +689,10 @@ top_locals = locals()
 
 @click.command()
 @click.option("--run_async", is_flag=True, help="Async")
-@click.option("--verbose", is_flag=True, help="Debug mode")
+@click.option("--verbose", is_flag=True, help="INFO output")
+# @click.option("--info", is_flag=True, help="Info output")
 def cli(run_async, verbose):
     """Command-line interface for the embed function."""
-
 
     # stdout bc otherwise there's softwrap
     getsitecmd = "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
@@ -698,7 +701,6 @@ def cli(run_async, verbose):
 
     getreplcmd = "which sqlrepl"
     repl_executable = os.popen(getreplcmd).read().strip()
-
 
     cwd = disp_cwd = os.getcwd()
     homedir = os.path.expanduser("~")
@@ -723,11 +725,12 @@ def cli(run_async, verbose):
         color = "yellow"
         # c.print(f"[{color}]NOT IN VIRTUAL ENV")
     c.print(f"[dim]cwd:  [{color}]{disp_cwd} {warns}")
-    c.print(f"[dim]Py:   [{color}]{rel_executable} ({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
+    c.print(
+        f"[dim]Py:   [{color}]{rel_executable} ({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})"
+    )
     c.print(f"[dim]repl: [{color}]{rel_repl}")
     c.print(f"[dim]site: [{color}]{rel_sitepackages}[/] ({has_customize}customized[/])")
     c.rule()
-
 
     # try:
     # import sitecustomize  # not automatic through pipx venv
@@ -736,7 +739,7 @@ def cli(run_async, verbose):
 
     log = logging.getLogger()
     if verbose:
-        log.setLevel(logging.DEBUG)
+        log.setLevel(logging.INFO)
     coroutine = embed(
         parent_globals=top_globals,
         parent_locals=top_locals,
