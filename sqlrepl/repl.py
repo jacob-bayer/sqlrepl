@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import asyncio
 from datetime import datetime, date
@@ -80,14 +81,34 @@ from google.api_core.exceptions import GoogleAPICallError
 # pretty.install()
 eastern = ZoneInfo("US/Eastern")
 
-# os.environ['MANPAGER'] ="bat --language=python --theme=Dracula"
-if "MANPAGER" in os.environ:
-    del os.environ["MANPAGER"]
-os.environ["PAGER"] = "less"
+os.environ['MANPAGER'] ="bat --language=py -p"
+# if "MANPAGER" in os.environ:
+    # del os.environ["MANPAGER"]
+os.environ["PAGER"] = "bat --language=py -p"
 
+def help(someobj: object) -> str | None:
+    # docstring = someobj.__doc__
+    # if not docstring:
+    #     return f"No docstring for {someobj}"
+    #
+    # # Regular expression to find "Parameters" and parameter names at the start of a line followed by a colon
+    # param_pattern = re.compile(r"(?<=\n)[ \t]*(\s*)(\w+)(\s*:\s*)(.*)", re.MULTILINE)
+    #
+    # # Function to apply blue color to parameter names and "Parameters"
+    # def apply_blue(match):
+    #     space = match.group(1) if match.group(1) else ''
+    #     word = match.group(2)
+    #     rest = match.group(4) if match.group(4) else ''
+    #     return f"{space}[blue]{word}[/]: [yellow]{rest}[/]"
+    #
+    # # Apply the regex substitution
+    # result = param_pattern.sub(apply_blue, docstring)
+    # result = result.replace('Parameters','[blue]Parameters[/]')
 
-def help(someobj):
-    print(someobj.__doc__)
+    c = get_console()
+    with c.pager():
+        c.print(someobj.__doc__, highlight=False, markup=True)
+#     return result
 
 
 def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
@@ -139,8 +160,7 @@ def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
         with contextlib.suppress(NotRenderableError):
             table.add_row(*row.astype(str), style=color)
 
-    c = get_console()
-    c.print(table)
+    get_console().print(table)
 
 
 class MyPrompt(PromptStyle):
@@ -321,9 +341,7 @@ class MyRpl(PythonRepl):
         except Exception as e:
             globals["last_exception"] = e
             globals["last_frame"] = sys
-            get_console().print_exception(
-                show_locals=False, suppress=[ptpython], max_frames=10
-            )
+            get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
     def do_sql(self, line: str) -> object:
         if not self.client:
@@ -396,9 +414,7 @@ class MyRpl(PythonRepl):
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
         globals["bqjobs"] = list(self.client.list_jobs(max_results=20))
-        globals["running_jobs"] = rj = list(
-            self.client.list_jobs(state_filter="running")
-        )
+        globals["running_jobs"] = rj = list(self.client.list_jobs(state_filter="running"))
         if rj:
             return "There are running jobs. Check `running_jobs`"
 
@@ -437,9 +453,7 @@ class MyRpl(PythonRepl):
         print(f"Type: {t.table_type}")
         if t.view_query:
             viewquery = format_fix(t.view_query)
-            highlighted = Syntax(
-                viewquery, "googlesql", theme=self.style, line_numbers=True
-            )
+            highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
             print(f":\n", highlighted, "\n")
         else:
             print(f"{t.num_rows} rows")
@@ -460,9 +474,7 @@ class MyRpl(PythonRepl):
         print("\n")
 
         if t.modified:
-            modified = t.modified.astimezone(eastern).strftime(
-                "%Y-%m-%d %I:%M:%S %p ET"
-            )
+            modified = t.modified.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
             print(f"Modified at: {modified}")
         if t.created:
             created = t.created.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
@@ -495,8 +507,13 @@ class MyRpl(PythonRepl):
             return self._checkrunning()
 
         if line == "reset_nvim_tries":
-            self.nvim = None
+            # self.nvim = None
             # self._ensure_nvim()
+
+            tmux_pane = os.getenv("TMUX_PANE")
+            if tmux_pane:
+                os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
+
             return "Reset nvim tries"
 
         if line.startswith("lookup"):
@@ -566,15 +583,14 @@ def embed(
     myglobals = parent_globals or globals()
     mylocals = parent_locals or locals()
 
+    if not debug_mode:
+        myglobals["__name__"] = "__main__"
 
     def get_globals():
         return myglobals
 
     def get_locals():
         return mylocals
-
-    # if not debug_mode:
-    # logging.disable()
 
     # Create REPL.
     repl = MyRpl(
@@ -632,9 +648,7 @@ def embed(
     @repl.add_key_binding("B", filter=ViNavigationMode())
     def _(event) -> None:
         b = event.current_buffer
-        b.cursor_position += b.document.get_start_of_line_position(
-            after_whitespace=True
-        )
+        b.cursor_position += b.document.get_start_of_line_position(after_whitespace=True)
 
     @repl.add_key_binding("c-space")
     def _(event) -> None:
@@ -665,8 +679,10 @@ async def run_asyncio_coroutine(coro):
     """
     await coro
 
+
 top_globals = globals()
 top_locals = locals()
+
 
 @click.command()
 @click.option("--run_async", is_flag=True, help="Async")
@@ -674,18 +690,49 @@ top_locals = locals()
 def cli(run_async, verbose):
     """Command-line interface for the embed function."""
 
+
     # stdout bc otherwise there's softwrap
-    real_sitepackages = os.popen(
-        "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
-    ).read()
+    getsitecmd = "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
+    sitepackages = os.popen(getsitecmd).read().strip()
+    sys.path.insert(0, sitepackages)
 
-    print(f"Real site-packages: {real_sitepackages.strip()}")
-    sys.path.insert(0, real_sitepackages)
-    try:
-        import sitecustomize  # not automatic through pipx venv
-    except ImportError:
-        pass
+    getreplcmd = "which sqlrepl"
+    repl_executable = os.popen(getreplcmd).read().strip()
 
+
+    cwd = disp_cwd = os.getcwd()
+    homedir = os.path.expanduser("~")
+    if os.path.exists(homedir):
+        disp_cwd = cwd.replace(homedir, "~")
+    rel_sitepackages = os.path.relpath(sitepackages, cwd)
+    rel_repl = os.path.relpath(repl_executable, cwd)
+    rel_executable = os.path.relpath(sys.executable, cwd)
+    sitecustomize = os.path.join(rel_sitepackages, "sitecustomize.py")
+    has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
+    no_vcs = "not a git repo" if not os.path.exists("./.git") else ""
+    no_proj = "not a pyproject" if not os.path.exists("./pyproject.toml") else ""
+    warnlist = [no_vcs, no_proj]
+    warns = f"[yellow]({', '.join(warnlist)})" if any(warnlist) else ""
+
+    c = get_console()
+
+    c.rule()
+    c.print("[yellow]Welcome to [green]Python-[blue]SQL [yellow]REPL")
+    color = "blue"
+    if not os.getenv("VIRTUAL_ENV"):
+        color = "yellow"
+        # c.print(f"[{color}]NOT IN VIRTUAL ENV")
+    c.print(f"[dim]cwd:  [{color}]{disp_cwd} {warns}")
+    c.print(f"[dim]Py:   [{color}]{rel_executable} ({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})")
+    c.print(f"[dim]repl: [{color}]{rel_repl}")
+    c.print(f"[dim]site: [{color}]{rel_sitepackages}[/] ({has_customize}customized[/])")
+    c.rule()
+
+
+    # try:
+    # import sitecustomize  # not automatic through pipx venv
+    # except ImportError:
+    # pass
 
     log = logging.getLogger()
     if verbose:

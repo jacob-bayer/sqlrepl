@@ -19,3 +19,9 @@ dependencies = [
 
 [project.scripts]
 sqlrepl = "sqlrepl:cli"
+
+[tool.uv]
+package = true
+
+[tool.black]
+line-length = 100
