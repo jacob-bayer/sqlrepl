@@ -1,5 +1,5 @@
 import os
-import re
+from pathlib import Path
 import sys
 import asyncio
 from datetime import datetime, date
@@ -686,6 +686,13 @@ async def run_asyncio_coroutine(coro):
 top_globals = globals()
 top_locals = locals()
 
+def check_project_status():
+    paths = {
+        "not a git repo": Path(".git"),
+        "not a pyproject": Path("pyproject.toml")
+    }
+    warnlist = [message for message, path in paths.items() if not path.exists()]
+    return f"[yellow]({', '.join(warnlist)})" if warnlist else ""
 
 @click.command()
 @click.option("--run_async", is_flag=True, help="Async")
@@ -714,7 +721,7 @@ def cli(run_async, verbose):
     no_vcs = "not a git repo" if not os.path.exists("./.git") else ""
     no_proj = "not a pyproject" if not os.path.exists("./pyproject.toml") else ""
     warnlist = [no_vcs, no_proj]
-    warns = f"[yellow]({', '.join(warnlist)})" if any(warnlist) else ""
+    warns = check_project_status()
 
     c = get_console()
 
@@ -725,17 +732,11 @@ def cli(run_async, verbose):
         color = "yellow"
         # c.print(f"[{color}]NOT IN VIRTUAL ENV")
     c.print(f"[dim]cwd:  [{color}]{disp_cwd} {warns}")
-    c.print(
-        f"[dim]Py:   [{color}]{rel_executable} ({sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro})"
-    )
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    c.print(f"[dim]Py:   [{color}]{rel_executable} ({py_version})")
     c.print(f"[dim]repl: [{color}]{rel_repl}")
     c.print(f"[dim]site: [{color}]{rel_sitepackages}[/] ({has_customize}customized[/])")
     c.rule()
-
-    # try:
-    # import sitecustomize  # not automatic through pipx venv
-    # except ImportError:
-    # pass
 
     log = logging.getLogger()
     if verbose:
