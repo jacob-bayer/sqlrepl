@@ -525,6 +525,7 @@ class MyRpl(PythonRepl):
 
         issql = line.split()[0] in [
             "SELECT",
+            "MERGE",
             "WITH",
             "CREATE",
             "DROP",
