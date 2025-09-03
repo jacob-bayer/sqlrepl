@@ -19,16 +19,8 @@ from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
 
-
-# venv = os.getenv("VIRTUAL_ENV")
-# sys.path
-# if venv:
-# sys.path.insert(1, venv + "/lib/python3.11/site-packages")
-
-
 log = logging.getLogger("sqlrepl")
-
-# from pynvim import attach
+is_linux = os.getenv('IS_LINUX') == "true"
 
 try:
     import pyperclip as pc  # pyright: ignore
@@ -70,7 +62,6 @@ def format_fix(query):
 from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.errors import NotRenderableError
@@ -343,7 +334,7 @@ class MyRpl(PythonRepl):
             return output
         except Exception as e:
             globals["last_exception"] = e
-            globals["last_frame"] = sys
+            # globals["last_frame"] = sys
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
     def do_sql(self, line: str) -> object:
@@ -385,14 +376,16 @@ class MyRpl(PythonRepl):
         print("Actual: ", bytes_billed, "GB")
         # client.query_and_wait is also an option
         is_select = line.startswith(("SELECT", "WITH"))
-        if is_select:
-            # df = query_job.to_dataframe()
-            globals["rows"] = []
-            globals["dictrows"] = []
-            for row in tqdm(res, total=res.total_rows):
-                globals["rows"].append(row)
-                globals["dictrows"].append(dict(row))
-            df = pd.DataFrame(globals["dictrows"])
+        if is_select and res.total_rows:
+            if is_linux and (res.total_rows > 10000):
+                df = query_job.to_dataframe()
+            else:
+                globals["rows"] = []
+                globals["dictrows"] = []
+                for row in tqdm(res, total=res.total_rows):
+                    globals["rows"].append(row)
+                    globals["dictrows"].append(dict(row))
+                df = pd.DataFrame(globals["dictrows"])
 
             rows, cols = df.shape
             if rows == 1:
@@ -402,7 +395,6 @@ class MyRpl(PythonRepl):
             else:
                 print("\n")
                 printdf(df.head(20))
-                # print(Markdown(df.to_markdown()))
                 print("\n")
             # globals["df"] = self.d.data = df
             globals["df"] = df
@@ -719,9 +711,6 @@ def cli(run_async, verbose):
     rel_executable = os.path.relpath(sys.executable, cwd)
     sitecustomize = os.path.join(rel_sitepackages, "sitecustomize.py")
     has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
-    no_vcs = "not a git repo" if not os.path.exists("./.git") else ""
-    no_proj = "not a pyproject" if not os.path.exists("./pyproject.toml") else ""
-    warnlist = [no_vcs, no_proj]
     warns = check_project_status()
 
     c = get_console()
