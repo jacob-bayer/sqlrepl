@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "db-dtypes>=1.4.3",
     "google-cloud-bigquery",
+    "google-cloud-bigquery-storage>=2.33.1",
     "numpy",
     "pandas",
     "prompt-toolkit",
