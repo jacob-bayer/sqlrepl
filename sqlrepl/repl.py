@@ -19,8 +19,10 @@ from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
 
-log = logging.getLogger("sqlrepl")
-is_linux = os.getenv('IS_LINUX') == "true"
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+is_linux = os.getenv("IS_LINUX") == "true"
 
 try:
     import pyperclip as pc  # pyright: ignore
@@ -42,7 +44,6 @@ pd.options.display.max_rows = 4000
 from decimal import Decimal
 import sqlfluff
 
-logging.getLogger("sqlfluff").setLevel(logging.WARNING)
 
 jinja_params = dict(
     ENV="dev",
@@ -494,30 +495,50 @@ class MyRpl(PythonRepl):
         if choice:
             return choice
 
-        if line == "help":
-            allcommands = ["checkrunning", "sql", "python"]
-            self.c.print("Commands:\n", "\n".join(allcommands))
-
-        if line in ["checkrunning", "getjobs"]:
+        if line == "checkrunning":
             return self._checkrunning()
 
-        if line == "reset_nvim_tries":
-            # self.nvim = None
-            # self._ensure_nvim()
+        if line == "bqsession":
+            if not self.client:
+                self.client, self.dry_client = self._get_bq_client()
+            self.client.default_query_job_config.create_session = True
+            session_id = self.client.query("SELECT 1").session_info.session_id
+            self.client.default_query_job_config.connection_properties = [
+                bq.ConnectionProperty("session_id", session_id)
+            ]
+            self.dry_client.default_query_job_config.connection_properties = [
+                bq.ConnectionProperty("session_id", session_id)
+            ]
+            self.client.default_query_job_config.create_session = False
+            self.c.print(f"\n[blue]BigQuery session started")
+            self.handle_choice("sql")
+            return
 
+        if line == "bqendsession":
+            if not self.client:
+                return "No active BigQuery client"
+            self.client.query("CALL BQ.ABORT_SESSION();").result()
+            self.client.default_query_job_config.connection_properties = []
+            self.dry_client.default_query_job_config.connection_properties = []
+            self.c.print("[blue]Ended BigQuery session")
+
+        if line == "reset_nvim_tries":
             tmux_pane = os.getenv("TMUX_PANE")
             if tmux_pane:
                 os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
-
             return "Reset nvim tries"
 
         if line.startswith("lookup"):
             self.lookup(line.split()[-1].replace("`", ""))
             return
 
-        issql = line.split()[0] in [
+        issql = line.strip().split()[0] in [
             "SELECT",
+            "EXPORT",
+            "DECLARE",
+            "SET",
             "MERGE",
+            "CALL",
             "WITH",
             "CREATE",
             "DROP",
@@ -679,13 +700,12 @@ async def run_asyncio_coroutine(coro):
 top_globals = globals()
 top_locals = locals()
 
+
 def check_project_status():
-    paths = {
-        "not a git repo": Path(".git"),
-        "not a pyproject": Path("pyproject.toml")
-    }
+    paths = {"not a git repo": Path(".git"), "not a pyproject": Path("pyproject.toml")}
     warnlist = [message for message, path in paths.items() if not path.exists()]
     return f"[yellow]({', '.join(warnlist)})" if warnlist else ""
+
 
 @click.command()
 @click.option("--run_async", is_flag=True, help="Async")
