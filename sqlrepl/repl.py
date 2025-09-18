@@ -717,20 +717,24 @@ def cli(run_async, verbose):
     # stdout bc otherwise there's softwrap
     getsitecmd = "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
     sitepackages = os.popen(getsitecmd).read().strip()
-    sys.path.insert(0, sitepackages)
+    sitecustomize = os.path.join(sitepackages, "sitecustomize.py")
+    has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
+    sys.path.insert(0, sitepackages) # ensure it's on top, not bottom
 
     getreplcmd = "which sqlrepl"
     repl_executable = os.popen(getreplcmd).read().strip()
 
     cwd = disp_cwd = os.getcwd()
     homedir = os.path.expanduser("~")
+    sys_executable = sys.executable
     if os.path.exists(homedir):
         disp_cwd = cwd.replace(homedir, "~")
-    rel_sitepackages = os.path.relpath(sitepackages, cwd)
-    rel_repl = os.path.relpath(repl_executable, cwd)
-    rel_executable = os.path.relpath(sys.executable, cwd)
-    sitecustomize = os.path.join(rel_sitepackages, "sitecustomize.py")
-    has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
+        sitepackages = sitepackages.replace(homedir, "~")
+        repl_executable = repl_executable.replace(homedir, "~")
+        sys_executable = sys.executable.replace(homedir, "~")
+    # rel_sitepackages = os.path.relpath(sitepackages, cwd)
+    # rel_repl = os.path.relpath(repl_executable, cwd)
+    # rel_executable = os.path.relpath(sys.executable, cwd)
     warns = check_project_status()
 
     c = get_console()
@@ -743,9 +747,9 @@ def cli(run_async, verbose):
         # c.print(f"[{color}]NOT IN VIRTUAL ENV")
     c.print(f"[dim]cwd:  [{color}]{disp_cwd} {warns}")
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    c.print(f"[dim]Py:   [{color}]{rel_executable} ({py_version})")
-    c.print(f"[dim]repl: [{color}]{rel_repl}")
-    c.print(f"[dim]site: [{color}]{rel_sitepackages}[/] ({has_customize}customized[/])")
+    c.print(f"[dim]Py:   [{color}]{sys_executable} ({py_version})")
+    c.print(f"[dim]repl: [{color}]{repl_executable} ")
+    c.print(f"[dim]site: [{color}]{sitepackages}[/] ({has_customize}customized[/])")
     c.rule()
 
     log = logging.getLogger()
