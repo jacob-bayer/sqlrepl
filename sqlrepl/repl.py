@@ -15,6 +15,7 @@ import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
+from ptpython.ipython import InteractiveShellEmbed
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
@@ -33,6 +34,11 @@ except:
     class pc:
         @classmethod
         def copy(cls, something):
+            log.warning("pyperclip failed to import. Nothing copied.")
+            return None
+
+        @classmethod
+        def paste(cls):
             log.warning("pyperclip failed to import. Nothing copied.")
             return None
 
