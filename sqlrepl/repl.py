@@ -19,9 +19,19 @@ from ptpython.ipython import InteractiveShellEmbed
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
+from zoneinfo import ZoneInfo
+from rich import print, get_console, inspect as ins
+from rich.console import Console
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.errors import NotRenderableError
+from rich.pretty import pprint
+from rich.logging import RichHandler
+import google.cloud.bigquery as bq
+from google.api_core.exceptions import GoogleAPICallError
 
 log = logging.getLogger()
-log.setLevel(logging.INFO)
+
 
 is_linux = os.getenv("IS_LINUX") == "true"
 
@@ -56,7 +66,7 @@ jinja_params = dict(
     PROJECT_ID=os.environ["PROJECT_ID"],
     DATASET_ID=os.environ["DATASET_ID"],
     DEC_DATASET_ID=os.environ["DEC_DATASET_ID"],
-    VOLTAGE_DATASET="voltage_anbc_hcb_dev",
+    VOLTAGE_DATASET=os.environ["VOLTAGE_DATASET"],
 )
 
 
@@ -66,14 +76,6 @@ def format_fix(query):
     return sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
 
 
-from zoneinfo import ZoneInfo
-from rich import print, get_console, inspect as ins
-from rich.console import Console
-from rich.syntax import Syntax
-from rich.table import Table
-from rich.errors import NotRenderableError
-import google.cloud.bigquery as bq
-from google.api_core.exceptions import GoogleAPICallError
 
 
 # pretty.install()
@@ -222,6 +224,26 @@ class MyRpl(PythonRepl):
     #
     #     return False
 
+
+    def init_console(self):
+        self.c = Console(color_system="truecolor")
+
+        if not os.getenv("TMUX_PANE"):
+            return
+
+        allpanes = os.popen('tmux list-panes -F "#{pane_id} #{pane_tty}"').readlines()
+        if len(allpanes) != 3:
+            return
+
+        log_to_id, log_to_tty = allpanes[1].strip().split()
+        for h in log.handlers:
+            if isinstance(h, RichHandler):
+                self.c.file=open(log_to_tty, "w")
+                h.console = self.c
+                h.console.clear()
+                log.info(f"Logging to tmux pane {log_to_id}")
+
+
     def __init__(
         self,
         title: str | None = None,
@@ -286,7 +308,7 @@ class MyRpl(PythonRepl):
         self.wrap_lines = True
         self.show_line_numbers = True
         self.highlight_matching_parenthesis = True
-        self.c = Console()
+        self.init_console()
         self.vi_start_in_navigation_mode = True
         self.vi_keep_last_used_mode = True
         self.insert_blank_line_after_output = True
@@ -344,11 +366,11 @@ class MyRpl(PythonRepl):
             # globals["last_frame"] = sys
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
+
+
     def do_sql(self, line: str) -> object:
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
-
-        print = self.c.print
 
         globals = self.get_globals()
 
@@ -380,7 +402,7 @@ class MyRpl(PythonRepl):
 
         pc.copy(query)
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
-        print("Actual: ", bytes_billed, "GB")
+        print(f"Actual: {bytes_billed} GB")
         # client.query_and_wait is also an option
         is_select = line.startswith(("SELECT", "WITH"))
         if is_select and res.total_rows:
@@ -456,7 +478,7 @@ class MyRpl(PythonRepl):
         if t.view_query:
             viewquery = format_fix(t.view_query)
             highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
-            print(f":\n", highlighted, "\n")
+            print(f":\n {highlighted} \n")
         else:
             print(f"{t.num_rows} rows")
         print("Columns")
@@ -491,7 +513,7 @@ class MyRpl(PythonRepl):
             x = await super().eval_async(line)
             sys.stdout.flush()
             if x is not None:
-                print(x)
+                pprint(x, max_length=100)
         except Exception as e:
             log.exception(e)
 
@@ -503,6 +525,10 @@ class MyRpl(PythonRepl):
 
         if line == "checkrunning":
             return self._checkrunning()
+
+        if line == "reset console":
+            self.c = init_console()
+            return "Reset console"
 
         if line == "bqsession":
             if not self.client:
@@ -516,7 +542,7 @@ class MyRpl(PythonRepl):
                 bq.ConnectionProperty("session_id", session_id)
             ]
             self.client.default_query_job_config.create_session = False
-            self.c.print(f"\n[blue]BigQuery session started")
+            print(f"\n[blue]BigQuery session started", console=self.c)
             self.handle_choice("sql")
             return
 
@@ -526,7 +552,7 @@ class MyRpl(PythonRepl):
             self.client.query("CALL BQ.ABORT_SESSION();").result()
             self.client.default_query_job_config.connection_properties = []
             self.dry_client.default_query_job_config.connection_properties = []
-            self.c.print("[blue]Ended BigQuery session")
+            print("[blue]Ended BigQuery session")
 
         if line == "reset_nvim_tries":
             tmux_pane = os.getenv("TMUX_PANE")
@@ -534,7 +560,7 @@ class MyRpl(PythonRepl):
                 os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
             return "Reset nvim tries"
 
-        if line.startswith("lookup"):
+        if line.startswith("lookup "):
             self.lookup(line.split()[-1].replace("`", ""))
             return
 
@@ -578,7 +604,7 @@ class MyRpl(PythonRepl):
                         extra_lines=10,
                     )
                 return
-            print(output)
+            pprint(output, max_length=100)
 
         # if isinstance(output, pd.DataFrame):
         # print(output)
