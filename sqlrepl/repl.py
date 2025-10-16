@@ -76,8 +76,6 @@ def format_fix(query):
     return sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
 
 
-
-
 # pretty.install()
 eastern = ZoneInfo("US/Eastern")
 
@@ -224,11 +222,9 @@ class MyRpl(PythonRepl):
     #
     #     return False
 
-
     def init_console(self):
         self.c = Console(color_system="truecolor")
-
-        if not os.getenv("TMUX_PANE"):
+        if not self.pipe_logs or not os.getenv("TMUX_PANE"):
             return
 
         allpanes = os.popen('tmux list-panes -F "#{pane_id} #{pane_tty}"').readlines()
@@ -238,17 +234,17 @@ class MyRpl(PythonRepl):
         log_to_id, log_to_tty = allpanes[1].strip().split()
         for h in log.handlers:
             if isinstance(h, RichHandler):
-                self.c.file=open(log_to_tty, "w")
+                self.c.file = open(log_to_tty, "w")
                 h.console = self.c
                 h.console.clear()
                 log.info(f"Logging to tmux pane {log_to_id}")
-
 
     def __init__(
         self,
         title: str | None = None,
         debug_mode: bool = False,
         is_async: bool = False,
+        pipe_logs: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -258,6 +254,7 @@ class MyRpl(PythonRepl):
         super().__init__(*args, **kwargs)
         self.debug_mode = debug_mode
         self.async_loop = is_async
+        self.pipe_logs = pipe_logs
         self.async_debug = self.debug_mode and self.async_loop
         self.title = title or "SqlRepl"
         self.show_custom_status_bar = title
@@ -365,8 +362,6 @@ class MyRpl(PythonRepl):
             globals["last_exception"] = e
             # globals["last_frame"] = sys
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
-
-
 
     def do_sql(self, line: str) -> object:
         if not self.client:
@@ -627,6 +622,7 @@ def embed(
     parent_globals=None,
     parent_locals=None,
     return_asyncio_coroutine=False,
+    pipe_logs=False,
 ):
 
     myglobals = parent_globals or globals()
@@ -648,6 +644,7 @@ def embed(
         get_globals=get_globals,
         get_locals=get_locals,
         is_async=return_asyncio_coroutine,
+        pipe_logs=pipe_logs,
     )
 
     @repl.add_key_binding("E", filter=ViNavigationMode())
@@ -740,10 +737,14 @@ def check_project_status():
 
 
 @click.command()
-@click.option("--run_async", is_flag=True, help="Async")
+@click.option("--run-async", is_flag=True, help="Async")
 @click.option("--verbose", is_flag=True, help="INFO output")
-# @click.option("--info", is_flag=True, help="Info output")
-def cli(run_async, verbose):
+@click.option(
+    "--pipe-logs",
+    is_flag=True,
+    help="pipe logs to tmux pane in top right corner if possible",
+)
+def cli(run_async, verbose, pipe_logs):
     """Command-line interface for the embed function."""
 
     # stdout bc otherwise there's softwrap
@@ -751,7 +752,7 @@ def cli(run_async, verbose):
     sitepackages = os.popen(getsitecmd).read().strip()
     sitecustomize = os.path.join(sitepackages, "sitecustomize.py")
     has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
-    sys.path.insert(0, sitepackages) # ensure it's on top, not bottom
+    sys.path.insert(0, sitepackages)  # ensure it's on top, not bottom
 
     getreplcmd = "which sqlrepl"
     repl_executable = os.popen(getreplcmd).read().strip()
@@ -791,6 +792,7 @@ def cli(run_async, verbose):
         parent_globals=top_globals,
         parent_locals=top_locals,
         return_asyncio_coroutine=run_async,
+        pipe_logs=pipe_logs,
     )
     if coroutine:
         asyncio.run(run_asyncio_coroutine(coroutine))
