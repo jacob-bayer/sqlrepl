@@ -11,11 +11,12 @@ from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
+from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
 import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
-from ptpython.ipython import InteractiveShellEmbed
+# from ptpython.ipython import InteractiveShellEmbed
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
@@ -126,7 +127,7 @@ def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
     colors = {
         "object": "blue",
         "float64": "green",
-        "Int64": "magenta",
+        "int64": "magenta",
         "bool": "cyan",
         "datetime64[ns]": "yellow",
     }
@@ -155,7 +156,7 @@ def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
 
     for idx, row in dataframe.iterrows():
         if rowcolor:
-            rowtype = type(row[color_by])
+            rowtype = str(type(row[color_by])).lower()
             color = colors.get(rowtype)
 
         with contextlib.suppress(NotRenderableError):
@@ -294,7 +295,6 @@ class MyRpl(PythonRepl):
         self.show_docstring = True
         self.show_status_bar = False
         self.ptpython_layout.status_bar = status_bar
-        # self.clipboard = PyperclipClipboard()
         self.terminal_title = "OMREPL"
         self.enable_open_in_editor = False
         self.enable_auto_suggest = True
@@ -426,7 +426,7 @@ class MyRpl(PythonRepl):
             globals["dfs"] = self.dfs
             return f"Returned {rows} rows, {cols} cols"
         else:
-            return "Query executed successfully"
+            return "[bold][green]Query executed successfully"
 
     def _checkrunning(self):
         globals = self.get_globals()
@@ -458,6 +458,9 @@ class MyRpl(PythonRepl):
     def lookup(self, tablename):
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
+
+        print = self.c.print
+
         splittable = tablename.split(".")
         if len(splittable) == 1:
             tablename = self.PROJECT_ID + "." + self.DATASET_ID + "." + tablename
@@ -471,24 +474,24 @@ class MyRpl(PythonRepl):
         print(f"\n{t.reference}\n")
         print(f"Type: {t.table_type}")
         if t.view_query:
-            viewquery = format_fix(t.view_query)
+            viewquery = format_fix(t.view_query) if not 'insight' in t.dataset_id else t.view_query
             highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
-            print(f":\n {highlighted} \n")
+            print("\n", highlighted, "\n")
         else:
             print(f"{t.num_rows} rows")
         print("Columns")
         colors = {
-            "NUMERIC": "blue",
-            "INTEGER": "blue",
+            "NUMERIC": "yellow",
+            "FLOAT": "yellow",
+            "INTEGER": "yellow",
             "STRING": "green",
-            "Int64": "magenta",
-            "bool": "cyan",
-            "TIMESTAMP": "yellow",
-            "DATE": "yellow",
+            # "BOOLEAN": "magenta",
+            "TIMESTAMP": "cyan",
+            "DATE": "cyan",
         }
         for col in t.schema:
-            color = colors.get(col.field_type, "")
-            print(f"[{color}]{col.field_type}: {col.name}")
+            color = colors.get(col.field_type, "reset")
+            print(f"[{color}]{col.name} {col.field_type}")
 
         print("\n")
 
@@ -592,14 +595,17 @@ class MyRpl(PythonRepl):
                 try:
                     raise output
                 except Exception as e:
-                    get_console().print_exception(
+                    self.c.print_exception(
                         show_locals=False,
                         suppress=[ptpython],
                         max_frames=10,
                         extra_lines=10,
                     )
                 return
-            pprint(output, max_length=100)
+            elif isinstance(output, (list, dict, set)):
+                pprint(output, max_length=100)
+                return
+            self.c.print(output)
 
         # if isinstance(output, pd.DataFrame):
         # print(output)
@@ -646,6 +652,8 @@ def embed(
         is_async=return_asyncio_coroutine,
         pipe_logs=pipe_logs,
     )
+
+    repl.app.clipboard = PyperclipClipboard()
 
     @repl.add_key_binding("E", filter=ViNavigationMode())
     def _(event) -> None:
@@ -798,5 +806,5 @@ def cli(run_async, verbose, pipe_logs):
         asyncio.run(run_asyncio_coroutine(coroutine))
 
 
-if __name__ == "__main__":
-    cli()
+# if __name__ == "__main__":
+    # cli()
