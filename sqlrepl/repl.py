@@ -1,4 +1,6 @@
 import os
+import site
+from site import ENABLE_USER_SITE
 from pathlib import Path
 import sys
 import asyncio
@@ -575,7 +577,7 @@ class MyRpl(PythonRepl):
         print("\nTable object is globally assigned to `t` for exploration\n")
 
     def _accept_handler(self, buff):
-        if buff.text.strip().split()[0] in sqlkeywords:
+        if buff.text and buff.text.strip().split()[0] in sqlkeywords:
             self.handle_choice("sql")
             buff.text = format_fix(buff.text)
         elif self.prompt_style == "sql":
@@ -884,6 +886,9 @@ def cli(run_async, verbose, pipe_logs):
     c.print(f"[dim]Py:   [{color}]{sys_executable} ({py_version})")
     c.print(f"[dim]repl: [{color}]{repl_executable} ")
     c.print(f"[dim]site: [{color}]{sitepackages}[/] ({has_customize}customized[/])")
+    if ENABLE_USER_SITE:
+        usersite = site.getusersitepackages().replace(homedir, "~")
+        c.print(f"[dim][yellow]usersite: [green]{usersite}[/]")
     if not os.getenv("SQLREPL_NO_HELP"):
         c.print("\nType [red]help[/] for instructions and available commands")
     c.rule()
