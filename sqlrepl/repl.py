@@ -5,8 +5,10 @@ import asyncio
 from datetime import datetime, date
 import contextlib
 import logging
+from textwrap import dedent
 from tqdm import tqdm
-from prompt_toolkit.filters import ViNavigationMode
+from prompt_toolkit.filters import vi_navigation_mode, Condition
+from prompt_toolkit.key_binding.vi_state import InputMode
 from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
 from prompt_toolkit.lexers import PygmentsLexer
@@ -22,6 +24,8 @@ from sqlrepl.style import mystyle
 import click
 from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
+insm = lambda x: ins(x, methods=True)
+insa = lambda x: ins(x, all=True)
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
@@ -44,7 +48,7 @@ except:
 
     class pc:
         @classmethod
-        def copy(cls, something):
+        def copy(cls, *args, **kwargs):
             log.warning("pyperclip failed to import. Nothing copied.")
             return None
 
@@ -58,17 +62,41 @@ import pandas as pd
 import numpy as np
 
 pd.options.display.max_rows = 4000
+pd.options.display.float_format = '{:.2f}'.format 
+
 from decimal import Decimal
 import sqlfluff
 
 
-jinja_params = dict(
-    ENV="dev",
-    PROJECT_ID=os.environ["PROJECT_ID"],
-    DATASET_ID=os.environ["DATASET_ID"],
-    DEC_DATASET_ID=os.environ["DEC_DATASET_ID"],
-    VOLTAGE_DATASET=os.environ["VOLTAGE_DATASET"],
-)
+try:
+    jinja_params = dict(
+        ENV="dev",
+        PROJECT_ID=os.environ["PROJECT_ID"],
+        DATASET_ID=os.environ["DATASET_ID"],
+        DEC_DATASET_ID=os.environ["DEC_DATASET_ID"],
+        VOLTAGE_DATASET=os.environ["VOLTAGE_DATASET"],
+    )
+except KeyError as e:
+    print("Must set PROJECT_ID, DATASET_ID, DEC_DATASET_ID, & VOLTAGE_DATASET environment variables to start SQLREPL")
+    sys.exit(1)
+
+
+sqlkeywords = [
+            "SELECT",
+            "EXPORT",
+            "DECLARE",
+            "SET",
+            "MERGE",
+            "CALL",
+            "WITH",
+            "CREATE",
+            "DROP",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "ASSERT",
+            "ALTER",
+        ]
 
 
 def format_fix(query):
@@ -81,9 +109,38 @@ def format_fix(query):
 eastern = ZoneInfo("US/Eastern")
 
 os.environ["MANPAGER"] = "bat --language=py -p"
-# if "MANPAGER" in os.environ:
-# del os.environ["MANPAGER"]
 os.environ["PAGER"] = "bat --language=py -p"
+
+def showhelp():
+    c = get_console()
+    c.print(dedent("""
+    Statements starting with a capitalized SQL keyword are executed as [blue]SQL[/], others as [green]Python[/].
+    All [blue]SQL[/] statements are automatically formatted before execution and copied to your clipboard if they succeed.
+    \n
+    Keys:
+    [magenta]F8[/]: switch between [blue]SQL[/] and [green]Python[/] modes (or just type [blue]sql[/] or [green]python[/] and press enter)
+    [magenta]Ctrl-D[/]: exit
+    [magenta]Ctrl-Q[/]: exit
+    \n
+    Global Variables:
+    [green]df[/]: last query result as pandas DataFrame
+    [green]dfs[/]: list of past query results as pandas DataFrames
+    \n
+    Commands:
+    [blue]lookup[/] <tablename>: look up a BigQuery table's schema and details
+        for example: [yellow]lookup [blue]clin_analytics_hcb_dev.cm_case_prep_common_membership[/][/]
+    [blue]bqsession[/]: start a BigQuery session with persistent temp tables and declarations
+    [blue]bqendsession[/]: end the current BigQuery session
+    [blue]checkrunning[/]: check for currently running BigQuery jobs and refresh these globals
+        [green]running_jobs[/]: list of currently running BigQuery jobs
+        [green]bqjobs[/]: list of last 20 BigQuery jobs
+    \n
+    Useful Functions:
+    [magenta]help[/]([yellow]something[/]) to read a [green]__doc__[/]
+    [magenta]ins[/]([yellow]object[/]) to inspect an object
+    \n
+    [red]IMPORTANT:[/] Queries are submitted asynchronousy. [magenta]Ctrl-C[/] stops waiting for results but does not cancel the query. To cancel the query, run [yellow]checkrunning[/], then running_jobs[0].cancel().
+    """))
 
 
 def help(someobj: object) -> str | None:
@@ -108,8 +165,6 @@ def help(someobj: object) -> str | None:
     c = get_console()
     with c.pager():
         c.print(someobj.__doc__, highlight=False, markup=True)
-
-
 #     return result
 
 
@@ -189,9 +244,15 @@ class MyPrompt(PromptStyle):
 
     def out_prompt(self) -> AnyFormattedText:
         idx = self.python_input.current_statement_index
-        color = "red"
+        color = "ansired"
         return HTML(f"<{color}>Result [{idx}]</{color}>: ")
 
+
+# def MyValidator(Validator):
+#
+#     @abstractmethod
+#     def validate(self, document: Document) -> None:
+#         if 
 
 class MyRpl(PythonRepl):
 
@@ -224,6 +285,16 @@ class MyRpl(PythonRepl):
     #     return False
 
     def init_console(self):
+        """ 
+        Initialize rich console, which will be the same tty the repl is running in,
+        unless the following conditions are met:
+        1. pipe_logs is True
+        2. running in tmux
+        3. there are exactly 3 panes in the tmux session
+        In which case the console will be redirected to the second pane.
+
+        """
+
         self.c = Console(color_system="truecolor")
         if not self.pipe_logs or not os.getenv("TMUX_PANE"):
             return
@@ -249,7 +320,7 @@ class MyRpl(PythonRepl):
         *args,
         **kwargs,
     ) -> None:
-        kwargs["vi_mode"] = True
+        kwargs["vi_mode"] = os.getenv("SQLREPL_VI")
         kwargs["history_filename"] = os.environ["HOME"] + "/ptpython_history_sql"
         kwargs["_extra_toolbars"] = [status_bar(self)]
         super().__init__(*args, **kwargs)
@@ -292,6 +363,7 @@ class MyRpl(PythonRepl):
         self.prompt_style = "python"
         self.confirm_exit = True
         self.enable_input_validation = False
+        # self._validator = Validator.from_callable(func=lambda text: bool(text.strip()), error_message="Input cannot be empty", move_cursor_to_end=True)
         self.show_docstring = True
         self.show_status_bar = False
         self.ptpython_layout.status_bar = status_bar
@@ -300,6 +372,7 @@ class MyRpl(PythonRepl):
         self.enable_auto_suggest = True
         self.enable_history_search = True
         self.enable_output_formatting = True
+        self.enable_dictionary_completion = True
         self.enable_pager = True
         self.complete_while_typing = False
         self.wrap_lines = True
@@ -363,16 +436,11 @@ class MyRpl(PythonRepl):
             # globals["last_frame"] = sys
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
-    def do_sql(self, line: str) -> object:
+    def do_sql(self, query: str) -> object:
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
 
         globals = self.get_globals()
-
-        query = format_fix(line)
-        syntax = Syntax(query, "googlesql", theme=self.style, line_numbers=True)
-        print(syntax)
-
         try:
             query_job = self.dry_client.query(query)
             bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
@@ -399,7 +467,7 @@ class MyRpl(PythonRepl):
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
         print(f"Actual: {bytes_billed} GB")
         # client.query_and_wait is also an option
-        is_select = line.startswith(("SELECT", "WITH"))
+        is_select = query.startswith(("SELECT", "WITH"))
         if is_select and res.total_rows:
             if is_linux and (res.total_rows > 10000):
                 df = query_job.to_dataframe()
@@ -432,9 +500,9 @@ class MyRpl(PythonRepl):
         globals = self.get_globals()
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
-        globals["bqjobs"] = list(self.client.list_jobs(max_results=20))
-        globals["running_jobs"] = rj = list(self.client.list_jobs(state_filter="running"))
-        if rj:
+        globals["bqjobs"] = self.bqjobs = list(self.client.list_jobs(max_results=20))
+        globals["running_jobs"] = self.running_jobs = list(self.client.list_jobs(state_filter="running"))
+        if self.running_jobs:
             return "There are running jobs. Check `running_jobs`"
 
     def handle_choice(self, filetype):
@@ -506,6 +574,14 @@ class MyRpl(PythonRepl):
         globals["t"] = t
         print("\nTable object is globally assigned to `t` for exploration\n")
 
+    def _accept_handler(self, buff):
+        if buff.text.strip().split()[0] in sqlkeywords:
+            self.handle_choice("sql")
+            buff.text = format_fix(buff.text)
+        elif self.prompt_style == "sql":
+            self.handle_choice("python")
+        return super()._accept_handler(buff)
+
     async def eval_async(self, line: str) -> object:
         try:
             x = await super().eval_async(line)
@@ -525,7 +601,7 @@ class MyRpl(PythonRepl):
             return self._checkrunning()
 
         if line == "reset console":
-            self.c = init_console()
+            self.init_console()
             return "Reset console"
 
         if line == "bqsession":
@@ -540,7 +616,7 @@ class MyRpl(PythonRepl):
                 bq.ConnectionProperty("session_id", session_id)
             ]
             self.client.default_query_job_config.create_session = False
-            print(f"\n[blue]BigQuery session started", console=self.c)
+            self.c.print(f"\n[blue]BigQuery session started")
             self.handle_choice("sql")
             return
 
@@ -550,7 +626,7 @@ class MyRpl(PythonRepl):
             self.client.query("CALL BQ.ABORT_SESSION();").result()
             self.client.default_query_job_config.connection_properties = []
             self.dry_client.default_query_job_config.connection_properties = []
-            print("[blue]Ended BigQuery session")
+            self.c.print("[blue]Ended BigQuery session")
 
         if line == "reset_nvim_tries":
             tmux_pane = os.getenv("TMUX_PANE")
@@ -558,31 +634,14 @@ class MyRpl(PythonRepl):
                 os.system(f"tmux setenv -g TMUX_TARGET_ID ''{tmux_pane}''")
             return "Reset nvim tries"
 
+        if line == "help":
+            showhelp()
+            return
+
         if line.startswith("lookup "):
             self.lookup(line.split()[-1].replace("`", ""))
             return
 
-        issql = line.strip().split()[0] in [
-            "SELECT",
-            "EXPORT",
-            "DECLARE",
-            "SET",
-            "MERGE",
-            "CALL",
-            "WITH",
-            "CREATE",
-            "DROP",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "ASSERT",
-            "ALTER",
-        ]
-
-        if issql:
-            self.handle_choice("sql")
-        else:
-            self.handle_choice("python")
 
         dofunc = {"sql": self.do_sql, "python": self.do_python}
         output = dofunc[self.prompt_style](line)
@@ -655,17 +714,22 @@ def embed(
 
     repl.app.clipboard = PyperclipClipboard()
 
-    @repl.add_key_binding("E", filter=ViNavigationMode())
+    @repl.add_key_binding("E", filter=vi_navigation_mode)
     def _(event) -> None:
         event.current_buffer.cursor_position += (
             event.current_buffer.document.get_end_of_line_position()
         )
 
+    @repl.add_key_binding("f7")
+    def _(event) -> None:
+        breakpoint()
+
     @repl.add_key_binding("f8")
     def _(event) -> None:
-        if event.app.current_buffer.text:
-            breakpoint()
-            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+        if repl.prompt_style == "python":
+            repl.handle_choice("sql")
+        else:
+            repl.handle_choice("python")
 
     # To debug events do this ( if in the repl, do get_globals = globals )
     # globals = get_globals()
@@ -687,9 +751,35 @@ def embed(
     def _(event) -> None:
         os.system("tmux copy-mode")
 
+
+
+    def real_exit(event):
+        """
+        Really quit.
+        """
+        if repl.client: # If there's a client, check for running jobs
+            repl._checkrunning()
+            repl.c.print(f"\n\n[red]Cancelling [green]{len(repl.running_jobs)}[/] running [blue]BQ[/] jobs")
+            for job in repl.running_jobs:
+                repl.client.cancel_job(job.job_id)
+        event.app.exit(exception=EOFError, style="class:exiting")
+
+    confirmation_visible = Condition(lambda: repl.show_exit_confirmation)
+    @repl.add_key_binding("y", filter=confirmation_visible)
+    @repl.add_key_binding("Y", filter=confirmation_visible)
+    @repl.add_key_binding("enter", filter=confirmation_visible)
+    @repl.add_key_binding("c-d", filter=confirmation_visible)
+    def _(event) -> None:
+        """
+        Really quit.
+        """
+        real_exit(event)
+        
+
     # press gf to go to the file under cursor
     # '/Users/n856925/Documents/github/ptpython/ptpython/key_bindings.py'
-    @repl.add_key_binding("c-q", filter=ViNavigationMode())
+    @repl.add_key_binding("c-q", filter=vi_navigation_mode)
+    @repl.add_key_binding("c-d", filter=vi_navigation_mode)
     def _(event) -> None:
         if repl.confirm_exit:
             # Show exit confirmation and focus it (focusing is important for
@@ -697,9 +787,9 @@ def embed(
             repl.show_exit_confirmation = True
             repl.app.layout.focus(repl.ptpython_layout.exit_confirmation)
         else:
-            event.app.exit(exception=EOFError)
+            real_exit(event)
 
-    @repl.add_key_binding("B", filter=ViNavigationMode())
+    @repl.add_key_binding("B", filter=vi_navigation_mode)
     def _(event) -> None:
         b = event.current_buffer
         b.cursor_position += b.document.get_start_of_line_position(after_whitespace=True)
@@ -714,6 +804,9 @@ def embed(
 
         if suggestion:
             b.insert_text(suggestion.text)
+
+    if repl.vi_mode and repl.vi_start_in_navigation_mode:
+        repl.app.vi_state.input_mode = InputMode.NAVIGATION
 
     if return_asyncio_coroutine:
 
@@ -791,7 +884,10 @@ def cli(run_async, verbose, pipe_logs):
     c.print(f"[dim]Py:   [{color}]{sys_executable} ({py_version})")
     c.print(f"[dim]repl: [{color}]{repl_executable} ")
     c.print(f"[dim]site: [{color}]{sitepackages}[/] ({has_customize}customized[/])")
+    if not os.getenv("SQLREPL_NO_HELP"):
+        c.print("\nType [red]help[/] for instructions and available commands")
     c.rule()
+
 
     log = logging.getLogger()
     if verbose:
