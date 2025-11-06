@@ -778,6 +778,12 @@ def embed(
         if event.app.current_buffer.text:
             event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
 
+
+    # overwrite this because I use it but never intend to cut text, and it's slow in ssh if xserver is connected
+    @repl.add_key_binding("x", filter=vi_navigation_mode)
+    def _(event) -> None:
+        event.current_buffer.delete()
+
     # can also use "is_multiline" condition to make ] and [ work when not in multiline
     # https://github.com/prompt-toolkit/ptpython/blob/5021832f76309755097b744f274c4e687a690b85/ptpython/key_bindings.py
     @repl.add_key_binding("c-y")
