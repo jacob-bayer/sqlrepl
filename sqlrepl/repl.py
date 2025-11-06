@@ -20,12 +20,14 @@ import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
 from ptpython.python_input import PythonInput
+
 # from ptpython.ipython import InteractiveShellEmbed
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 import click
 from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
+
 insm = lambda x: ins(x, methods=True)
 insa = lambda x: ins(x, all=True)
 from rich.console import Console
@@ -34,6 +36,8 @@ from rich.table import Table
 from rich.errors import NotRenderableError
 from rich.pretty import pprint
 from rich.logging import RichHandler
+from rich.progress import track
+from rich.markdown import Markdown
 import google.cloud.bigquery as bq
 from google.api_core.exceptions import GoogleAPICallError
 
@@ -64,7 +68,7 @@ import pandas as pd
 import numpy as np
 
 pd.options.display.max_rows = 4000
-pd.options.display.float_format = '{:.2f}'.format 
+pd.options.display.float_format = "{:.2f}".format
 
 from decimal import Decimal
 import sqlfluff
@@ -79,26 +83,28 @@ try:
         VOLTAGE_DATASET=os.environ["VOLTAGE_DATASET"],
     )
 except KeyError as e:
-    print("Must set PROJECT_ID, DATASET_ID, DEC_DATASET_ID, & VOLTAGE_DATASET environment variables to start SQLREPL")
+    print(
+        "Must set PROJECT_ID, DATASET_ID, DEC_DATASET_ID, & VOLTAGE_DATASET environment variables to start SQLREPL"
+    )
     sys.exit(1)
 
 
 sqlkeywords = [
-            "SELECT",
-            "EXPORT",
-            "DECLARE",
-            "SET",
-            "MERGE",
-            "CALL",
-            "WITH",
-            "CREATE",
-            "DROP",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "ASSERT",
-            "ALTER",
-        ]
+    "SELECT",
+    "EXPORT",
+    "DECLARE",
+    "SET",
+    "MERGE",
+    "CALL",
+    "WITH",
+    "CREATE",
+    "DROP",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "ASSERT",
+    "ALTER",
+]
 
 
 def format_fix(query):
@@ -113,9 +119,12 @@ eastern = ZoneInfo("US/Eastern")
 os.environ["MANPAGER"] = "bat --language=py -p"
 os.environ["PAGER"] = "bat --language=py -p"
 
+
 def showhelp():
     c = get_console()
-    c.print(dedent("""
+    c.print(
+        dedent(
+            """
     Statements starting with a capitalized SQL keyword are executed as [blue]SQL[/], others as [green]Python[/].
     All [blue]SQL[/] statements are automatically formatted before execution and copied to your clipboard if they succeed.
     \n
@@ -142,7 +151,10 @@ def showhelp():
     [magenta]ins[/]([yellow]object[/]) to inspect an object
     \n
     [red]IMPORTANT:[/] Queries are submitted asynchronousy. [magenta]Ctrl-C[/] stops waiting for results but does not cancel the query. To cancel the query, run [yellow]checkrunning[/], then running_jobs[0].cancel().
-    """))
+    Before exiting, the REPL will attempt cancel of all of your running BQ jobs, if there are any.
+    """
+        )
+    )
 
 
 def help(someobj: object) -> str | None:
@@ -167,6 +179,8 @@ def help(someobj: object) -> str | None:
     c = get_console()
     with c.pager():
         c.print(someobj.__doc__, highlight=False, markup=True)
+
+
 #     return result
 
 
@@ -254,7 +268,8 @@ class MyPrompt(PromptStyle):
 #
 #     @abstractmethod
 #     def validate(self, document: Document) -> None:
-#         if 
+#         if
+
 
 class MyRpl(PythonRepl):
 
@@ -287,7 +302,7 @@ class MyRpl(PythonRepl):
     #     return False
 
     def init_console(self):
-        """ 
+        """
         Initialize rich console, which will be the same tty the repl is running in,
         unless the following conditions are met:
         1. pipe_logs is True
@@ -398,7 +413,7 @@ class MyRpl(PythonRepl):
 
     def _get_bq_client(self) -> tuple[bq.Client, bq.Client]:
 
-        print("[blue]Establishing connection to BigQuery")
+        print("[blue]Connecting...", end=" ")
 
         # Instantiating client does this step anyway so it doesnt add any extra time
         from google.auth import default
@@ -406,12 +421,13 @@ class MyRpl(PythonRepl):
         credentials, _ = default()
 
         default_dataset = bq.DatasetReference(self.PROJECT_ID, self.DATASET_ID)
-        default_config = bq.QueryJobConfig(default_dataset=default_dataset)
+        default_config = bq.QueryJobConfig(
+            default_dataset=default_dataset, job_timeout_ms=600000  # 10 min timeout
+        )
         dry_run_config = bq.QueryJobConfig(
             default_dataset=default_dataset, dry_run=True, use_query_cache=False
         )
         client = bq.Client(
-            project=self.PROJECT_ID,
             credentials=credentials,
             default_query_job_config=default_config,
         )
@@ -420,7 +436,7 @@ class MyRpl(PythonRepl):
             credentials=credentials,
             default_query_job_config=dry_run_config,
         )
-        print("[green]Connected to BigQuery")
+        print("[green]Done",end="\r")
 
         return client, dry_client
 
@@ -446,11 +462,14 @@ class MyRpl(PythonRepl):
         try:
             query_job = self.dry_client.query(query)
             bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
-            print("Est: ", bytes_billed, "GB")
+            estmsg = f"Est {bytes_billed} GB"
+            self.c.print(f"[dim]{estmsg}", end="... ")
         except Exception as e:
             print(f"\n{e}")
             return
-        print("[yellow]Working...")
+        print("[green]Submitted[/]", end="\r")
+        is_select = query.startswith(("SELECT", "WITH"))
+        query = f'SET @@dataset_project_id="{self.PROJECT_ID}";\n{query}'
         query_job = self.client.query(query)
 
         # This is only necessary because failed assertions are not caught by the dry run
@@ -466,26 +485,40 @@ class MyRpl(PythonRepl):
             return
 
         pc.copy(query)
+        color = 'dim'
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
-        print(f"Actual: {bytes_billed} GB")
+        if bytes_billed:
+            color = 'red' if bytes_billed >= 500 else 'yellow' if bytes_billed >= 100 else 'blue'
+        print(f"[dim]{estmsg} -> Done ([{color}]{bytes_billed}[/] GB)")
         # client.query_and_wait is also an option
-        is_select = query.startswith(("SELECT", "WITH"))
         if is_select and res.total_rows:
-            if is_linux and (res.total_rows > 10000):
+            large_result = res.total_rows > 40000
+            if is_linux and large_result:
                 df = query_job.to_dataframe()
             else:
                 globals["rows"] = []
                 globals["dictrows"] = []
-                for row in tqdm(res, total=res.total_rows):
+                for row in track(
+                    res,
+                    total=res.total_rows,
+                    description=f"Getting {res.total_rows} results...",
+                    disable=not large_result,
+                    transient=True,
+                    console=self.c
+                ):
                     globals["rows"].append(row)
                     globals["dictrows"].append(dict(row))
                 df = pd.DataFrame(globals["dictrows"])
+                print()
 
             rows, cols = df.shape
             if rows == 1:
                 print(df.T)
             elif cols > 10:
-                print(df.head(10))
+                _max_rows = pd.options.display.max_rows
+                pd.options.display.max_rows = 10
+                print(df)
+                pd.options.display.max_rows = _max_rows
             else:
                 print("\n")
                 printdf(df.head(20))
@@ -503,7 +536,9 @@ class MyRpl(PythonRepl):
         if not self.client:
             self.client, self.dry_client = self._get_bq_client()
         globals["bqjobs"] = self.bqjobs = list(self.client.list_jobs(max_results=20))
-        globals["running_jobs"] = self.running_jobs = list(self.client.list_jobs(state_filter="running"))
+        globals["running_jobs"] = self.running_jobs = list(
+            self.client.list_jobs(state_filter="running")
+        )
         if self.running_jobs:
             return "There are running jobs. Check `running_jobs`"
 
@@ -577,7 +612,8 @@ class MyRpl(PythonRepl):
         print("\nTable object is globally assigned to `t` for exploration\n")
 
     def _accept_handler(self, buff):
-        if buff.text and buff.text.strip().split()[0] in sqlkeywords:
+        words = buff.text.strip().split()
+        if words and words[0] in sqlkeywords:
             self.handle_choice("sql")
             buff.text = format_fix(buff.text)
         elif self.prompt_style == "sql":
@@ -643,7 +679,6 @@ class MyRpl(PythonRepl):
         if line.startswith("lookup "):
             self.lookup(line.split()[-1].replace("`", ""))
             return
-
 
         dofunc = {"sql": self.do_sql, "python": self.do_python}
         output = dofunc[self.prompt_style](line)
@@ -753,20 +788,21 @@ def embed(
     def _(event) -> None:
         os.system("tmux copy-mode")
 
-
-
     def real_exit(event):
         """
         Really quit.
         """
-        if repl.client: # If there's a client, check for running jobs
+        if repl.client:  # If there's a client, check for running jobs
             repl._checkrunning()
-            repl.c.print(f"\n\n[red]Cancelling [green]{len(repl.running_jobs)}[/] running [blue]BQ[/] jobs")
+            repl.c.print(
+                f"\n\n[red]Cancelling [green]{len(repl.running_jobs)}[/] running [blue]BQ[/] jobs"
+            )
             for job in repl.running_jobs:
                 repl.client.cancel_job(job.job_id)
         event.app.exit(exception=EOFError, style="class:exiting")
 
     confirmation_visible = Condition(lambda: repl.show_exit_confirmation)
+
     @repl.add_key_binding("y", filter=confirmation_visible)
     @repl.add_key_binding("Y", filter=confirmation_visible)
     @repl.add_key_binding("enter", filter=confirmation_visible)
@@ -776,7 +812,6 @@ def embed(
         Really quit.
         """
         real_exit(event)
-        
 
     # press gf to go to the file under cursor
     # '/Users/n856925/Documents/github/ptpython/ptpython/key_bindings.py'
@@ -893,7 +928,6 @@ def cli(run_async, verbose, pipe_logs):
         c.print("\nType [red]help[/] for instructions and available commands")
     c.rule()
 
-
     log = logging.getLogger()
     if verbose:
         log.setLevel(logging.INFO)
@@ -908,4 +942,4 @@ def cli(run_async, verbose, pipe_logs):
 
 
 # if __name__ == "__main__":
-    # cli()
+# cli()
