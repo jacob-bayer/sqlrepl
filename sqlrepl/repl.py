@@ -9,10 +9,12 @@ import contextlib
 import logging
 from textwrap import dedent
 from tqdm import tqdm
+import db_dtypes
 from prompt_toolkit.filters import vi_navigation_mode, Condition
 from prompt_toolkit.key_binding.vi_state import InputMode
 from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
+import pyarrow as pa
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
 from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
@@ -39,6 +41,7 @@ from rich.logging import RichHandler
 from rich.progress import track
 from rich.markdown import Markdown
 import google.cloud.bigquery as bq
+import google.cloud.bigquery_storage as bqs
 from google.api_core.exceptions import GoogleAPICallError
 
 log = logging.getLogger()
@@ -69,6 +72,32 @@ import numpy as np
 
 pd.options.display.max_rows = 4000
 pd.options.display.float_format = "{:.2f}".format
+
+utcpd = pd.DatetimeTZDtype(tz="UTC")
+
+pandas_bq_types = dict(
+    bool_dtype=pa.bool_(),
+    int_dtype=pa.int64(),
+    float_dtype=pa.float64(),
+    string_dtype=pa.string(),
+    date_dtype=pa.timestamp("us", tz="UTC"),
+    datetime_dtype=pa.timestamp("us", tz="UTC"),
+    timestamp_dtype=pa.timestamp("us", tz="UTC"),
+)
+
+pandas_bq_types = {k: pd.ArrowDtype(v) for k,v in pandas_bq_types.items()}
+
+
+bqtypes = {
+    "BOOL": pandas_bq_types["bool_dtype"],
+    "INTEGER": pandas_bq_types["int_dtype"],
+    "FLOAT": pandas_bq_types["float_dtype"],
+    "STRING": pandas_bq_types["string_dtype"],
+    "DATE": pandas_bq_types["date_dtype"],
+    "DATETIME": pandas_bq_types["date_dtype"],
+    "TIMESTAMP": pandas_bq_types["date_dtype"],
+}
+    
 
 from decimal import Decimal
 import sqlfluff
@@ -344,7 +373,9 @@ class MyRpl(PythonRepl):
         self.debug_mode = debug_mode
         self.async_loop = is_async
         self.pipe_logs = pipe_logs
+        self.bq_storage_mode = os.getenv("SQLREPL_USE_BQ_STORAGE", False)
         self.async_debug = self.debug_mode and self.async_loop
+        self.storage_client = None
         self.title = title or "SqlRepl"
         self.show_custom_status_bar = title
         self.style = "dracula"
@@ -436,7 +467,10 @@ class MyRpl(PythonRepl):
             credentials=credentials,
             default_query_job_config=dry_run_config,
         )
-        print("[green]Done",end="\r")
+        print("[green]Done", end="\r")
+
+        if self.bq_storage_mode:
+            self.storage_client = bqs.BigQueryReadClient(credentials=credentials)
 
         return client, dry_client
 
@@ -484,17 +518,19 @@ class MyRpl(PythonRepl):
             print(f"\nError: {e}\n")
             return
 
+        # newtypes = {x.name: pd.ArrowDtype(bqtypes.get(x.field_type)) for x in res.schema}
+
         pc.copy(query)
-        color = 'dim'
+        color = "dim"
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
         if bytes_billed:
-            color = 'red' if bytes_billed >= 500 else 'yellow' if bytes_billed >= 100 else 'blue'
+            color = "red" if bytes_billed >= 500 else "yellow" if bytes_billed >= 100 else "blue"
         print(f"[dim]{estmsg} -> Done ([{color}]{bytes_billed}[/] GB)")
         # client.query_and_wait is also an option
         if is_select and res.total_rows:
             large_result = res.total_rows > 40000
-            if is_linux and large_result:
-                df = query_job.to_dataframe()
+            if self.bq_storage_mode or (is_linux and large_result):
+                df = res.to_dataframe(bqstorage_client=self.storage_client, **pandas_bq_types) # type: ignore
             else:
                 globals["rows"] = []
                 globals["dictrows"] = []
@@ -504,12 +540,15 @@ class MyRpl(PythonRepl):
                     description=f"Getting {res.total_rows} results...",
                     disable=not large_result,
                     transient=True,
-                    console=self.c
+                    console=self.c,
                 ):
                     globals["rows"].append(row)
                     globals["dictrows"].append(dict(row))
                 df = pd.DataFrame(globals["dictrows"])
                 print()
+
+            df.attrs["query"] = query
+            df.attrs["meta"] = {k: str(v) for k, v in df.dtypes.items()}
 
             rows, cols = df.shape
             if rows == 1:
@@ -579,7 +618,7 @@ class MyRpl(PythonRepl):
         print(f"\n{t.reference}\n")
         print(f"Type: {t.table_type}")
         if t.view_query:
-            viewquery = format_fix(t.view_query) if not 'insight' in t.dataset_id else t.view_query
+            viewquery = format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
             highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
             print("\n", highlighted, "\n")
         else:
@@ -777,7 +816,6 @@ def embed(
     def _(event) -> None:
         if event.app.current_buffer.text:
             event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
-
 
     # overwrite this because I use it but never intend to cut text, and it's slow in ssh if xserver is connected
     @repl.add_key_binding("x", filter=vi_navigation_mode)
