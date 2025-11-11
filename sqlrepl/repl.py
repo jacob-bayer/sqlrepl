@@ -17,7 +17,9 @@ from pygments.lexers.python import PythonLexer
 import pyarrow as pa
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
-from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+
+# from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+from sqlrepl.osc_clipboard import OSCClipboard
 import ptpython
 from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
@@ -39,7 +41,8 @@ from rich.errors import NotRenderableError
 from rich.pretty import pprint
 from rich.logging import RichHandler
 from rich.progress import track
-from rich.markdown import Markdown
+
+# from rich.markdown import Markdown
 import google.cloud.bigquery as bq
 import google.cloud.bigquery_storage as bqs
 from google.api_core.exceptions import GoogleAPICallError
@@ -48,23 +51,6 @@ log = logging.getLogger()
 
 
 is_linux = os.getenv("IS_LINUX") == "true"
-
-try:
-    import pyperclip as pc  # pyright: ignore
-
-    pc.copy("")
-except:
-
-    class pc:
-        @classmethod
-        def copy(cls, *args, **kwargs):
-            log.warning("pyperclip failed to import. Nothing copied.")
-            return None
-
-        @classmethod
-        def paste(cls):
-            log.warning("pyperclip failed to import. Nothing copied.")
-            return None
 
 
 import pandas as pd
@@ -150,39 +136,36 @@ os.environ["PAGER"] = "bat --language=py -p"
 
 
 def showhelp():
-    c = get_console()
-    c.print(
-        dedent(
-            """
-    Statements starting with a capitalized SQL keyword are executed as [blue]SQL[/], others as [green]Python[/].
-    All [blue]SQL[/] statements are automatically formatted before execution and copied to your clipboard if they succeed.
-    \n
-    Keys:
-    [magenta]F8[/]: switch between [blue]SQL[/] and [green]Python[/] modes (or just type [blue]sql[/] or [green]python[/] and press enter)
-    [magenta]Ctrl-D[/]: exit
-    [magenta]Ctrl-Q[/]: exit
-    \n
-    Global Variables:
-    [green]df[/]: last query result as pandas DataFrame
-    [green]dfs[/]: list of past query results as pandas DataFrames
-    \n
-    Commands:
-    [blue]lookup[/] <tablename>: look up a BigQuery table's schema and details
-        for example: [yellow]lookup [blue]clin_analytics_hcb_dev.cm_case_prep_common_membership[/][/]
-    [blue]bqsession[/]: start a BigQuery session with persistent temp tables and declarations
-    [blue]bqendsession[/]: end the current BigQuery session
-    [blue]checkrunning[/]: check for currently running BigQuery jobs and refresh these globals
-        [green]running_jobs[/]: list of currently running BigQuery jobs
-        [green]bqjobs[/]: list of last 20 BigQuery jobs
-    \n
-    Useful Functions:
-    [magenta]help[/]([yellow]something[/]) to read a [green]__doc__[/]
-    [magenta]ins[/]([yellow]object[/]) to inspect an object
-    \n
-    [red]IMPORTANT:[/] Queries are submitted asynchronousy. [magenta]Ctrl-C[/] stops waiting for results but does not cancel the query. To cancel the query, run [yellow]checkrunning[/], then running_jobs[0].cancel().
-    Before exiting, the REPL will attempt cancel of all of your running BQ jobs, if there are any.
-    """
-        )
+    get_console().print(
+        """
+Statements starting with a capitalized SQL keyword are executed as [blue]SQL[/], others as [green]Python[/].
+All [blue]SQL[/] statements are automatically formatted before execution and copied to your clipboard if they succeed.
+\n
+Keys:
+[magenta]F8[/]: switch between [blue]SQL[/] and [green]Python[/] modes (or just type [blue]sql[/] or [green]python[/] and press enter)
+[magenta]Ctrl-D[/]: exit
+[magenta]Ctrl-Q[/]: exit
+\n
+Global Variables:
+[green]df[/]: last query result as pandas DataFrame
+[green]dfs[/]: list of past query results as pandas DataFrames
+\n
+Commands:
+[blue]lookup[/] <tablename>: look up a BigQuery table's schema and details
+    for example: [yellow]lookup [blue]clin_analytics_hcb_dev.cm_case_prep_common_membership[/][/]
+[blue]bqsession[/]: start a BigQuery session with persistent temp tables and declarations
+[blue]bqendsession[/]: end the current BigQuery session
+[blue]checkrunning[/]: check for currently running BigQuery jobs and refresh these globals
+    [green]running_jobs[/]: list of currently running BigQuery jobs
+    [green]bqjobs[/]: list of last 20 BigQuery jobs
+\n
+Useful Functions:
+[magenta]help[/]([yellow]something[/]) to read a [green]__doc__[/]
+[magenta]ins[/]([yellow]object[/]) to inspect an object
+\n
+[red]IMPORTANT:[/] Queries are submitted asynchronousy. [magenta]Ctrl-C[/] stops waiting for results but does not cancel the query. To cancel the query, run [yellow]checkrunning[/], then running_jobs[0].cancel().
+Before exiting, the REPL will attempt cancel of all of your running BQ jobs, if there are any.
+"""
     )
 
 
@@ -518,9 +501,7 @@ class MyRpl(PythonRepl):
             print(f"\nError: {e}\n")
             return
 
-        # newtypes = {x.name: pd.ArrowDtype(bqtypes.get(x.field_type)) for x in res.schema}
-
-        pc.copy(query)
+        self.app.clipboard.set_text(query)
         color = "dim"
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
         if bytes_billed:
@@ -788,7 +769,7 @@ def embed(
         pipe_logs=pipe_logs,
     )
 
-    repl.app.clipboard = PyperclipClipboard()
+    repl.app.clipboard = OSCClipboard()
 
     @repl.add_key_binding("E", filter=vi_navigation_mode)
     def _(event) -> None:
@@ -833,16 +814,16 @@ def embed(
         os.system("tmux copy-mode")
 
     def real_exit(event):
-        """
-        Really quit.
-        """
         if repl.client:  # If there's a client, check for running jobs
-            repl._checkrunning()
-            repl.c.print(
-                f"\n\n[red]Cancelling [green]{len(repl.running_jobs)}[/] running [blue]BQ[/] jobs"
-            )
-            for job in repl.running_jobs:
-                repl.client.cancel_job(job.job_id)
+            try:
+                repl._checkrunning()
+                job_cnt = len(repl.running_jobs)
+                repl.c.print(f"\n\n[red]Cancelling [green]{job_cnt}[/] running [blue]BQ[/] jobs")
+                for job in repl.running_jobs:
+                    repl.client.cancel_job(job.job_id)
+            except Exception as e:
+                log.error(f"Error cancelling jobs: {e}")
+                # log.exception(e)
         event.app.exit(exception=EOFError, style="class:exiting")
 
     confirmation_visible = Condition(lambda: repl.show_exit_confirmation)
@@ -852,9 +833,6 @@ def embed(
     @repl.add_key_binding("enter", filter=confirmation_visible)
     @repl.add_key_binding("c-d", filter=confirmation_visible)
     def _(event) -> None:
-        """
-        Really quit.
-        """
         real_exit(event)
 
     # press gf to go to the file under cursor
@@ -930,8 +908,7 @@ def cli(run_async, verbose, pipe_logs):
     """Command-line interface for the embed function."""
 
     # stdout bc otherwise there's softwrap
-    getsitecmd = "python -c 'import site, sys; sys.stdout.write(site.getsitepackages()[0])'"
-    sitepackages = os.popen(getsitecmd).read().strip()
+    sitepackages = site.getsitepackages()[0]
     sitecustomize = os.path.join(sitepackages, "sitecustomize.py")
     has_customize = "[red]not " if not os.path.isfile(sitecustomize) else "[green]"
     sys.path.insert(0, sitepackages)  # ensure it's on top, not bottom
@@ -965,6 +942,10 @@ def cli(run_async, verbose, pipe_logs):
     c.print(f"[dim]Py:   [{color}]{sys_executable} ({py_version})")
     c.print(f"[dim]repl: [{color}]{repl_executable} ")
     c.print(f"[dim]site: [{color}]{sitepackages}[/] ({has_customize}customized[/])")
+    if loaded_sc := sys.modules.get("sitecustomize"):
+        c.print(f"[dim]sitecustomize: [green]{loaded_sc.__file__.replace(homedir,'~')}[/]") # type: ignore
+    if loaded_uc := sys.modules.get("usercustomize"):
+        c.print(f"[dim]usercustomize loaded from: [green]{loaded_uc.__file__.replace(homedir,'~')}[/]") # type: ignore
     if ENABLE_USER_SITE:
         usersite = site.getusersitepackages().replace(homedir, "~")
         c.print(f"[dim][yellow]usersite: [green]{usersite}[/]")
