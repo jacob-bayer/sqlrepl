@@ -71,7 +71,7 @@ pandas_bq_types = dict(
     timestamp_dtype=pa.timestamp("us", tz="UTC"),
 )
 
-pandas_bq_types = {k: pd.ArrowDtype(v) for k,v in pandas_bq_types.items()}
+pandas_bq_types = {k: pd.ArrowDtype(v) for k, v in pandas_bq_types.items()}
 
 
 bqtypes = {
@@ -83,7 +83,7 @@ bqtypes = {
     "DATETIME": pandas_bq_types["date_dtype"],
     "TIMESTAMP": pandas_bq_types["date_dtype"],
 }
-    
+
 
 from decimal import Decimal
 import sqlfluff
@@ -511,7 +511,7 @@ class MyRpl(PythonRepl):
         if is_select and res.total_rows:
             large_result = res.total_rows > 40000
             if self.bq_storage_mode or (is_linux and large_result):
-                df = res.to_dataframe(bqstorage_client=self.storage_client, **pandas_bq_types) # type: ignore
+                df = res.to_dataframe(bqstorage_client=self.storage_client, **pandas_bq_types)  # type: ignore
             else:
                 globals["rows"] = []
                 globals["dictrows"] = []
@@ -600,7 +600,9 @@ class MyRpl(PythonRepl):
         print(f"Type: {t.table_type}")
         if viewquery := t.view_query:
             try:
-                viewquery = format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
+                viewquery = (
+                    format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
+                )
             except KeyboardInterrupt:
                 print("\n[red]View query display cancelled\n")
             highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
@@ -889,6 +891,13 @@ async def run_asyncio_coroutine(coro):
     await coro
 
 
+def export_df(df, name, row_limit=2000):
+    if df.index.name:
+        df = df.reset_index().reset_index()
+    row_limit = row_limit or len(df)
+    df.head(row_limit).to_parquet(f"{os.environ['HOME']}/tmp/parq/{name}.parquet", index=False)
+
+
 top_globals = globals()
 top_locals = locals()
 
@@ -946,9 +955,9 @@ def cli(run_async, verbose, pipe_logs):
     c.print(f"[dim]repl: [{color}]{repl_executable} ")
     c.print(f"[dim]site: [{color}]{sitepackages}[/] ({has_customize}customized[/])")
     if loaded_sc := sys.modules.get("sitecustomize"):
-        c.print(f"[dim]sitecustomize: [green]{loaded_sc.__file__.replace(homedir,'~')}[/]") # type: ignore
+        c.print(f"[dim]sitecustomize: [green]{loaded_sc.__file__.replace(homedir,'~')}[/]")  # type: ignore
     if loaded_uc := sys.modules.get("usercustomize"):
-        c.print(f"[dim]usercustomize loaded from: [green]{loaded_uc.__file__.replace(homedir,'~')}[/]") # type: ignore
+        c.print(f"[dim]usercustomize loaded from: [green]{loaded_uc.__file__.replace(homedir,'~')}[/]")  # type: ignore
     if ENABLE_USER_SITE:
         usersite = site.getusersitepackages().replace(homedir, "~")
         c.print(f"[dim][yellow]usersite: [green]{usersite}[/]")
