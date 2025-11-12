@@ -598,8 +598,11 @@ class MyRpl(PythonRepl):
         t = self.client.get_table(tablename)
         print(f"\n{t.reference}\n")
         print(f"Type: {t.table_type}")
-        if t.view_query:
-            viewquery = format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
+        if viewquery := t.view_query:
+            try:
+                viewquery = format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
+            except KeyboardInterrupt:
+                print("\n[red]View query display cancelled\n")
             highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
             print("\n", highlighted, "\n")
         else:
