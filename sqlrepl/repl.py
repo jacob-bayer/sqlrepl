@@ -548,8 +548,10 @@ class MyRpl(PythonRepl):
             self.dfs.append(df)
             globals["dfs"] = self.dfs
             return f"Returned {rows} rows, {cols} cols"
+        elif is_select:
+            return "[bold][green]Query returned zero rows[/]"
         else:
-            return "[bold][green]Query executed successfully"
+            return f"[bold][green]Finished[/]"
 
     def _checkrunning(self):
         globals = self.get_globals()
