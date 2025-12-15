@@ -94,8 +94,8 @@ try:
         ENV="dev",
         PROJECT_ID=os.environ["PROJECT_ID"],
         DATASET_ID=os.environ["DATASET_ID"],
-        DEC_DATASET_ID=os.environ["DEC_DATASET_ID"],
-        VOLTAGE_DATASET=os.environ["VOLTAGE_DATASET"],
+        DEC_DATASET_ID=os.environ["PROJECT_ID"]+'.'+os.environ["DEC_DATASET_ID"],
+        VOLTAGE_DATASET=os.environ["PROJECT_ID"]+'.'+os.environ["VOLTAGE_DATASET"],
     )
 except KeyError as e:
     print(
