@@ -93,7 +93,7 @@ try:
     jinja_params = dict(
         ENV="dev",
         PROJECT_ID=os.environ["PROJECT_ID"],
-        DATASET_ID=os.environ["DATASET_ID"],
+        DATASET_ID=os.environ["PROJECT_ID"]+'.'+os.environ["DATASET_ID"],
         DEC_DATASET_ID=os.environ["PROJECT_ID"]+'.'+os.environ["DEC_DATASET_ID"],
         VOLTAGE_DATASET=os.environ["PROJECT_ID"]+'.'+os.environ["VOLTAGE_DATASET"],
     )
@@ -417,8 +417,8 @@ class MyRpl(PythonRepl):
         self.nvim = None
         self.dfs = []
         self.client = None
-        self.PROJECT_ID = jinja_params["PROJECT_ID"]
-        self.DATASET_ID = jinja_params["DATASET_ID"]
+        self.PROJECT_ID = os.environ["PROJECT_ID"]
+        self.DATASET_ID = os.environ["DATASET_ID"]
         # self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
         # self._ensure_nvim()  # Initialize nvim context
         # self.c = Console()
