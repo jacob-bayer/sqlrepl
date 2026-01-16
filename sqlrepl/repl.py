@@ -1,5 +1,6 @@
 import os
 import site
+from jupyter_client.blocking.client import BlockingKernelClient
 from site import ENABLE_USER_SITE
 from pathlib import Path
 import sys
@@ -17,6 +18,8 @@ from pygments.lexers.python import PythonLexer
 import pyarrow as pa
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit import print_formatted_text
 
 # from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
 from sqlrepl.osc_clipboard import OSCClipboard
@@ -93,9 +96,9 @@ try:
     jinja_params = dict(
         ENV="dev",
         PROJECT_ID=os.environ["PROJECT_ID"],
-        DATASET_ID=os.environ["PROJECT_ID"]+'.'+os.environ["DATASET_ID"],
-        DEC_DATASET_ID=os.environ["PROJECT_ID"]+'.'+os.environ["DEC_DATASET_ID"],
-        VOLTAGE_DATASET=os.environ["PROJECT_ID"]+'.'+os.environ["VOLTAGE_DATASET"],
+        DATASET_ID=os.environ["PROJECT_ID"] + "." + os.environ["DATASET_ID"],
+        DEC_DATASET_ID=os.environ["PROJECT_ID"] + "." + os.environ["DEC_DATASET_ID"],
+        VOLTAGE_DATASET=os.environ["PROJECT_ID"] + "." + os.environ["VOLTAGE_DATASET"],
     )
 except KeyError as e:
     print(
@@ -254,18 +257,23 @@ class MyPrompt(PromptStyle):
         self.python_input = python_input
         self.prompt_title = prompt_title
         colors = {
-            "SQL": "ansiblue",
-            "Py": "ansigreen",
-            "Debug": "ansired",
-            "Async": "ansired",
-            "DebugAsync": "ansired",
+            "SQL": {"fg": "ansiblue"},
+            "Py": {"fg": "ansigreen", "idx": "ansiyellow"},
+            "iPy": {"fg": "#289c36", "idx": "#2080D0"},
+            "Debug": {"fg": "ansired"},
+            "Async": {"fg": "ansired"},
+            "DebugAsync": {"fg": "ansired"},
         }
-        self.color = colors.get(prompt_title, "ansiblue")
+        main_color = colors.get(prompt_title, {})
+        self.color = main_color.get("fg", "ansiblue")
+        self.idx_color = main_color.get("idx")
 
     def in_prompt(self) -> AnyFormattedText:
         idx = self.python_input.current_statement_index
+        if self.idx_color:
+            idx = f"<style fg='{self.idx_color}'>{idx}</style>"
         title = self.prompt_title
-        return HTML(f"<{self.color}>{title} [{idx}]</{self.color}>: ")
+        return HTML(f"<style fg='{self.color}'>{title} [{idx}]</style>: ")
 
     def in2_prompt(self, width: int) -> AnyFormattedText:
         return "...: ".rjust(width)
@@ -385,6 +393,7 @@ class MyRpl(PythonRepl):
         # )
         self.all_prompt_styles["sql"] = MyPrompt(self, "SQL")
         self.all_prompt_styles["python"] = MyPrompt(self, "Py")
+        self.all_prompt_styles["ipython"] = MyPrompt(self, "iPy")
         if self.debug_mode:
             self.all_prompt_styles["python"] = MyPrompt(self, "Debug")
         if self.async_loop:
@@ -425,6 +434,14 @@ class MyRpl(PythonRepl):
         # self.get_globals = self.get_globals
         # self.get_locals = self.get_locals
 
+        self.ipython_mode = False
+        if self.ipython_mode:
+            cf = "/Users/n856925/Library/Jupyter/runtime/test.json"
+            self.kc = BlockingKernelClient(connection_file=cf)
+            self.kc.load_connection_file()
+            self.kc.start_channels()
+            self.prompt_style = "ipython"
+
     def _get_bq_client(self) -> tuple[bq.Client, bq.Client]:
 
         print("[blue]Connecting...", end=" ")
@@ -456,6 +473,29 @@ class MyRpl(PythonRepl):
             self.storage_client = bqs.BigQueryReadClient(credentials=credentials)
 
         return client, dry_client
+
+    def do_ipython(self, line: str):
+        self.kc.execute(f"_console.width = {self.c.width}")
+        msg_id = self.kc.execute(line)
+        result = None
+        while True:
+            msg = self.kc.get_iopub_msg()
+            if msg["parent_header"].get("msg_id") != msg_id:
+                continue
+            mtype = msg["header"]["msg_type"]
+            content = msg["content"]
+            # print(f"DEBUG: mtype={mtype}, content={content}")
+            if mtype == "stream":  # print/output
+                print(content["text"], end="")
+            elif mtype in ("display_data", "execute_result"):  # input prompt
+                result = content["data"].get("text/plain", "")
+            elif mtype == "error":  # rich traceback pieces
+                result = "\n".join(content["traceback"])
+            elif mtype == "status" and content["execution_state"] == "idle":
+                break
+
+        if result:
+            print_formatted_text(ANSI(result))
 
     def do_python(self, line: str):
 
@@ -566,7 +606,7 @@ class MyRpl(PythonRepl):
 
     def handle_choice(self, filetype):
 
-        if filetype not in ["sql", "python"]:
+        if filetype not in ["sql", "python","ipython"]:
             return
 
         if filetype == self.prompt_style:
@@ -576,8 +616,8 @@ class MyRpl(PythonRepl):
             self.prompt_style = "sql"
             self._lexer = PygmentsLexer(GoogleSqlLexer)
 
-        if filetype == "python":
-            self.prompt_style = "python"
+        if filetype in ["python","ipython"]:
+            self.prompt_style = filetype
             self._lexer = PygmentsLexer(PythonLexer)
 
         return f"Mode: {self.prompt_style.upper()}"
@@ -707,7 +747,11 @@ class MyRpl(PythonRepl):
             self.lookup(line.split()[-1].replace("`", ""))
             return
 
-        dofunc = {"sql": self.do_sql, "python": self.do_python}
+        dofunc = {
+            "sql": self.do_sql,
+            "python": self.do_python,
+            "ipython": self.do_ipython,
+        }
         output = dofunc[self.prompt_style](line)
         has_output = output is not None
         # The best strategy would be to learn how self.style_transformations works in conjunction
@@ -729,6 +773,7 @@ class MyRpl(PythonRepl):
                 pprint(output, max_length=100)
                 return
             self.c.print(output)
+            # return output
 
         # if isinstance(output, pd.DataFrame):
         # print(output)
@@ -783,6 +828,14 @@ def embed(
         event.current_buffer.cursor_position += (
             event.current_buffer.document.get_end_of_line_position()
         )
+
+    @repl.add_key_binding("f6")
+    def _(event) -> None:
+        repl.ipython_mode = not repl.ipython_mode
+        if repl.ipython_mode:
+            repl.handle_choice("ipython")
+        else:
+            repl.handle_choice("python")
 
     @repl.add_key_binding("f7")
     def _(event) -> None:
