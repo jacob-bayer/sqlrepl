@@ -6,9 +6,7 @@ from pathlib import Path
 import sys
 import asyncio
 from datetime import datetime, date
-import contextlib
 import logging
-from textwrap import dedent
 from tqdm import tqdm
 import db_dtypes
 from prompt_toolkit.filters import vi_navigation_mode, Condition
@@ -17,20 +15,20 @@ from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
 import pyarrow as pa
 from prompt_toolkit.lexers import PygmentsLexer
-from prompt_toolkit.formatted_text import HTML, AnyFormattedText
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit import print_formatted_text
 
 # from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
 from sqlrepl.osc_clipboard import OSCClipboard
 import ptpython
-from ptpython.prompt_style import PromptStyle
 from ptpython.repl import PythonRepl
-from ptpython.python_input import PythonInput
 
 # from ptpython.ipython import InteractiveShellEmbed
+from sqlrepl.constants import SQL_KEYWORD_SET
+from sqlrepl.formatting import apply_jinja_params, format_fix
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
+from sqlrepl.ui import MyPrompt, printdf, showhelp
 import click
 from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
@@ -39,8 +37,6 @@ insm = lambda x: ins(x, methods=True)
 insa = lambda x: ins(x, all=True)
 from rich.console import Console
 from rich.syntax import Syntax
-from rich.table import Table
-from rich.errors import NotRenderableError
 from rich.pretty import pprint
 from rich.logging import RichHandler
 from rich.progress import track
@@ -88,47 +84,8 @@ bqtypes = {
 }
 
 
-from decimal import Decimal
-import sqlfluff
 
 
-try:
-    jinja_params = dict(
-        ENV="dev",
-        PROJECT_ID=os.environ["PROJECT_ID"],
-        DATASET_ID=os.environ["PROJECT_ID"] + "." + os.environ["DATASET_ID"],
-        DEC_DATASET_ID=os.environ["PROJECT_ID"] + "." + os.environ["DEC_DATASET_ID"],
-        VOLTAGE_DATASET=os.environ["PROJECT_ID"] + "." + os.environ["VOLTAGE_DATASET"],
-    )
-except KeyError as e:
-    print(
-        "Must set PROJECT_ID, DATASET_ID, DEC_DATASET_ID, & VOLTAGE_DATASET environment variables to start SQLREPL"
-    )
-    sys.exit(1)
-
-
-sqlkeywords = [
-    "SELECT",
-    "EXPORT",
-    "DECLARE",
-    "SET",
-    "MERGE",
-    "CALL",
-    "WITH",
-    "CREATE",
-    "DROP",
-    "INSERT",
-    "UPDATE",
-    "DELETE",
-    "ASSERT",
-    "ALTER",
-]
-
-
-def format_fix(query):
-    for key, value in jinja_params.items():
-        query = query.replace("{{" + key + "}}", value)
-    return sqlfluff.fix(query, config_path=os.environ["HOME"] + "/.sqlfluff")
 
 
 # pretty.install()
@@ -136,40 +93,6 @@ eastern = ZoneInfo("US/Eastern")
 
 os.environ["MANPAGER"] = "bat --language=py -p"
 os.environ["PAGER"] = "bat --language=py -p"
-
-
-def showhelp():
-    get_console().print(
-        """
-Statements starting with a capitalized SQL keyword are executed as [blue]SQL[/], others as [green]Python[/].
-All [blue]SQL[/] statements are automatically formatted before execution and copied to your clipboard if they succeed.
-\n
-Keys:
-[magenta]F8[/]: switch between [blue]SQL[/] and [green]Python[/] modes (or just type [blue]sql[/] or [green]python[/] and press enter)
-[magenta]Ctrl-D[/]: exit
-[magenta]Ctrl-Q[/]: exit
-\n
-Global Variables:
-[green]df[/]: last query result as pandas DataFrame
-[green]dfs[/]: list of past query results as pandas DataFrames
-\n
-Commands:
-[blue]lookup[/] <tablename>: look up a BigQuery table's schema and details
-    for example: [yellow]lookup [blue]clin_analytics_hcb_dev.cm_case_prep_common_membership[/][/]
-[blue]bqsession[/]: start a BigQuery session with persistent temp tables and declarations
-[blue]bqendsession[/]: end the current BigQuery session
-[blue]checkrunning[/]: check for currently running BigQuery jobs and refresh these globals
-    [green]running_jobs[/]: list of currently running BigQuery jobs
-    [green]bqjobs[/]: list of last 20 BigQuery jobs
-\n
-Useful Functions:
-[magenta]help[/]([yellow]something[/]) to read a [green]__doc__[/]
-[magenta]ins[/]([yellow]object[/]) to inspect an object
-\n
-[red]IMPORTANT:[/] Queries are submitted asynchronousy. [magenta]Ctrl-C[/] stops waiting for results but does not cancel the query. To cancel the query, run [yellow]checkrunning[/], then running_jobs[0].cancel().
-Before exiting, the REPL will attempt cancel of all of your running BQ jobs, if there are any.
-"""
-    )
 
 
 def help(someobj: object) -> str | None:
@@ -197,91 +120,6 @@ def help(someobj: object) -> str | None:
 
 
 #     return result
-
-
-def printdf(dataframe, title="Dataframe", color_by="dtype") -> None:
-    """Display dataframe as table using rich library.
-    Args:
-        df (pd.DataFrame): dataframe to display
-        title (str, optional): title of the table. Defaults to "Dataframe".
-    Raises:
-        NotRenderableError: if dataframe cannot be rendered
-    Returns:
-        rich.table.Table: rich table
-    """
-
-    colors = {
-        "object": "blue",
-        "float64": "green",
-        "int64": "magenta",
-        "bool": "cyan",
-        "datetime64[ns]": "yellow",
-    }
-
-    rowcolor = False
-    if color_by != "dtype":
-        colors = {
-            str: "blue",
-            float: "green",
-            int: "magenta",
-            bool: "cyan",
-            date: "yellow",
-            datetime: "yellow",
-            pd.Timestamp: "yellow",
-            Decimal: "green",
-        }
-        rowcolor = True
-
-    table = Table(title=title)
-    dataframe = dataframe.copy()
-    color = ""
-    for col, dtype in dataframe.dtypes.items():
-        if color_by == "dtype":
-            color = colors.get(str(dtype), "")
-        table.add_column(col, header_style=f"bold {color}", style=color)
-
-    for idx, row in dataframe.iterrows():
-        if rowcolor:
-            rowtype = str(type(row[color_by])).lower()
-            color = colors.get(rowtype)
-
-        with contextlib.suppress(NotRenderableError):
-            table.add_row(*row.astype(str), style=color)
-
-    get_console().print(table)
-
-
-class MyPrompt(PromptStyle):
-
-    def __init__(self, python_input: PythonInput, prompt_title: str) -> None:
-        self.python_input = python_input
-        self.prompt_title = prompt_title
-        colors = {
-            "SQL": {"fg": "ansiblue"},
-            "Py": {"fg": "ansigreen", "idx": "ansiyellow"},
-            "iPy": {"fg": "#289c36", "idx": "#2080D0"},
-            "Debug": {"fg": "ansired"},
-            "Async": {"fg": "ansired"},
-            "DebugAsync": {"fg": "ansired"},
-        }
-        main_color = colors.get(prompt_title, {})
-        self.color = main_color.get("fg", "ansiblue")
-        self.idx_color = main_color.get("idx")
-
-    def in_prompt(self) -> AnyFormattedText:
-        idx = self.python_input.current_statement_index
-        if self.idx_color:
-            idx = f"<style fg='{self.idx_color}'>{idx}</style>"
-        title = self.prompt_title
-        return HTML(f"<style fg='{self.color}'>{title} [{idx}]</style>: ")
-
-    def in2_prompt(self, width: int) -> AnyFormattedText:
-        return "...: ".rjust(width)
-
-    def out_prompt(self) -> AnyFormattedText:
-        idx = self.python_input.current_statement_index
-        color = "ansired"
-        return HTML(f"<{color}>Result [{idx}]</{color}>: ")
 
 
 # def MyValidator(Validator):
@@ -474,6 +312,50 @@ class MyRpl(PythonRepl):
 
         return client, dry_client
 
+    def _ensure_bq_clients(self) -> None:
+        if not self.client:
+            self.client, self.dry_client = self._get_bq_client()
+
+    def _normalize_table_name(self, tablename: str) -> str:
+        splittable = tablename.split(".")
+        if len(splittable) == 1:
+            tablename = self.PROJECT_ID + "." + self.DATASET_ID + "." + tablename
+        if len(splittable) == 2:
+            tablename = self.PROJECT_ID + "." + tablename
+        return apply_jinja_params(tablename)
+
+    def _render_dataframe_preview(self, df: pd.DataFrame) -> None:
+        rows, cols = df.shape
+        if rows == 1:
+            print(df.T)
+        elif cols > 10:
+            _max_rows = pd.options.display.max_rows
+            pd.options.display.max_rows = 10
+            print(df)
+            pd.options.display.max_rows = _max_rows
+        else:
+            print("\n")
+            printdf(df.head(20))
+            print("\n")
+
+    def _store_dataframe(self, df: pd.DataFrame) -> None:
+        globals = self.get_globals()
+        df.attrs["meta"] = {k: str(v) for k, v in df.dtypes.items()}
+        globals["df"] = df
+        self.dfs.append(df)
+        globals["dfs"] = self.dfs
+
+    def _print_query_estimate(self, query: str) -> str | None:
+        try:
+            query_job = self.dry_client.query(query)
+            bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
+            estmsg = f"Est {bytes_billed} GB"
+            self.c.print(f"[dim]{estmsg}", end="... ")
+            return estmsg
+        except Exception as e:
+            print(f"\n{e}")
+            return None
+
     def do_ipython(self, line: str):
         self.kc.execute(f"_console.width = {self.c.width}")
         msg_id = self.kc.execute(line)
@@ -512,17 +394,9 @@ class MyRpl(PythonRepl):
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
     def do_sql(self, query: str) -> object:
-        if not self.client:
-            self.client, self.dry_client = self._get_bq_client()
-
-        globals = self.get_globals()
-        try:
-            query_job = self.dry_client.query(query)
-            bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
-            estmsg = f"Est {bytes_billed} GB"
-            self.c.print(f"[dim]{estmsg}", end="... ")
-        except Exception as e:
-            print(f"\n{e}")
+        self._ensure_bq_clients()
+        estmsg = self._print_query_estimate(query)
+        if not estmsg:
             return
         print("[green]Submitted[/]", end="\r")
         is_select = query.startswith(("SELECT", "WITH"))
@@ -553,6 +427,7 @@ class MyRpl(PythonRepl):
             if self.bq_storage_mode or (is_linux and large_result):
                 df = res.to_dataframe(bqstorage_client=self.storage_client, **pandas_bq_types)  # type: ignore
             else:
+                globals = self.get_globals()
                 globals["rows"] = []
                 globals["dictrows"] = []
                 for row in track(
@@ -569,24 +444,9 @@ class MyRpl(PythonRepl):
                 print()
 
             df.attrs["query"] = query
-            df.attrs["meta"] = {k: str(v) for k, v in df.dtypes.items()}
-
             rows, cols = df.shape
-            if rows == 1:
-                print(df.T)
-            elif cols > 10:
-                _max_rows = pd.options.display.max_rows
-                pd.options.display.max_rows = 10
-                print(df)
-                pd.options.display.max_rows = _max_rows
-            else:
-                print("\n")
-                printdf(df.head(20))
-                print("\n")
-            # globals["df"] = self.d.data = df
-            globals["df"] = df
-            self.dfs.append(df)
-            globals["dfs"] = self.dfs
+            self._render_dataframe_preview(df)
+            self._store_dataframe(df)
             return f"Returned {rows} rows, {cols} cols"
         elif is_select:
             return "[bold][green]Query returned zero rows[/]"
@@ -595,8 +455,7 @@ class MyRpl(PythonRepl):
 
     def _checkrunning(self):
         globals = self.get_globals()
-        if not self.client:
-            self.client, self.dry_client = self._get_bq_client()
+        self._ensure_bq_clients()
         globals["bqjobs"] = self.bqjobs = list(self.client.list_jobs(max_results=20))
         globals["running_jobs"] = self.running_jobs = list(
             self.client.list_jobs(state_filter="running")
@@ -623,21 +482,10 @@ class MyRpl(PythonRepl):
         return f"Mode: {self.prompt_style.upper()}"
 
     def lookup(self, tablename):
-        if not self.client:
-            self.client, self.dry_client = self._get_bq_client()
+        self._ensure_bq_clients()
 
         print = self.c.print
-
-        splittable = tablename.split(".")
-        if len(splittable) == 1:
-            tablename = self.PROJECT_ID + "." + self.DATASET_ID + "." + tablename
-        if len(splittable) == 2:
-            tablename = self.PROJECT_ID + "." + tablename
-
-        for key, value in jinja_params.items():
-            tablename = tablename.replace("{{" + key + "}}", value)
-
-        t = self.client.get_table(tablename)
+        t = self.client.get_table(self._normalize_table_name(tablename))
         print(f"\n{t.reference}\n")
         print(f"Type: {t.table_type}")
         if viewquery := t.view_query:
@@ -680,7 +528,7 @@ class MyRpl(PythonRepl):
 
     def _accept_handler(self, buff):
         words = buff.text.strip().split()
-        if words and words[0] in sqlkeywords:
+        if words and words[0] in SQL_KEYWORD_SET:
             self.handle_choice("sql")
             buff.text = format_fix(buff.text)
         elif self.prompt_style == "sql":
