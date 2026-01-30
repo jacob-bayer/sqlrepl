@@ -111,20 +111,102 @@ except KeyError as e:
 
 
 sqlkeywords = [
-    "SELECT",
-    "EXPORT",
-    "DECLARE",
-    "SET",
-    "MERGE",
-    "CALL",
-    "WITH",
+    "ALL",
+    "AND",
+    "ANY",
+    "ARRAY",
+    "AS",
+    "ASC",
+    "ASSERT_ROWS_MODIFIED",
+    "AT",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "CAST",
+    "COLLATE",
+    "CONTAINS",
     "CREATE",
-    "DROP",
-    "INSERT",
-    "UPDATE",
-    "DELETE",
-    "ASSERT",
-    "ALTER",
+    "CROSS",
+    "CUBE",
+    "CURRENT",
+    "DEFAULT",
+    "DEFINE",
+    "DESC",
+    "DISTINCT",
+    "ELSE",
+    "END",
+    "ENUM",
+    "ESCAPE",
+    "EXCEPT",
+    "EXCLUDE",
+    "EXISTS",
+    "EXTRACT",
+    "FALSE",
+    "FETCH",
+    "FOLLOWING",
+    "FOR",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "GROUPING",
+    "GROUPS",
+    "HASH",
+    "HAVING",
+    "IF",
+    "IGNORE",
+    "IN",
+    "INNER",
+    "INTERSECT",
+    "INTERVAL",
+    "INTO",
+    "IS",
+    "JOIN",
+    "LATERAL",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "LOOKUP",
+    "MERGE",
+    "NATURAL",
+    "NEW",
+    "NO",
+    "NOT",
+    "NULL",
+    "NULLS",
+    "OF",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "OVER",
+    "PARTITION",
+    "PRECEDING",
+    "PROTO",
+    "QUALIFY",
+    "RANGE",
+    "RECURSIVE",
+    "RESPECT",
+    "RIGHT",
+    "ROLLUP",
+    "ROWS",
+    "SELECT",
+    "SET",
+    "SOME",
+    "STRUCT",
+    "TABLESAMPLE",
+    "THEN",
+    "TO",
+    "TREAT",
+    "TRUE",
+    "UNBOUNDED",
+    "UNION",
+    "UNNEST",
+    "USING",
+    "WHEN",
+    "WHERE",
+    "WINDOW",
+    "WITH",
+    "WITHIN",
 ]
 
 
@@ -366,6 +448,21 @@ class BigQueryCompleter(Completer):
             log.debug("BigQuery schema fetch failed for %s.%s: %s", dataset_id, table_id, e)
             return []
 
+    def _columns_for_table_path(self, table_path: str) -> list[str]:
+        raw = table_path.strip("`")
+        parts = raw.split(".")
+        if len(parts) == 3:
+            project_id, dataset_id, table_id = parts
+            if project_id != self.repl.PROJECT_ID:
+                return []
+            return self._get_columns(dataset_id, table_id)
+        if len(parts) == 2:
+            dataset_id, table_id = parts
+            return self._get_columns(dataset_id, table_id)
+        if len(parts) == 1:
+            return self._get_columns(self.repl.DATASET_ID, parts[0])
+        return []
+
     def _extract_token(self, text: str) -> str:
         match = self._TOKEN_RE.search(text)
         return match.group(0) if match else ""
@@ -446,15 +543,122 @@ class BigQueryCompleter(Completer):
             return
 
 
+class SQLKeywordCompleter(Completer):
+    _TOKEN_RE = re.compile(r"[A-Za-z_]+$")
+
+    def __init__(self, repl, keywords: list[str]) -> None:
+        self.repl = repl
+        self.keywords = keywords
+
+    def _extract_token(self, text: str) -> str:
+        match = self._TOKEN_RE.search(text)
+        return match.group(0) if match else ""
+
+    def get_completions(self, document, complete_event):
+        if self.repl.prompt_style != "sql":
+            return
+
+        token = self._extract_token(document.text_before_cursor)
+        if not token:
+            return
+
+        token_upper = token.upper()
+        for keyword in self.keywords:
+            if keyword.startswith(token_upper):
+                yield Completion(keyword, start_position=-len(token))
+
+
 class SQLReplCompleter(Completer):
-    def __init__(self, repl, python_completer: Completer, sql_completer: Completer) -> None:
+    def __init__(
+        self,
+        repl,
+        python_completer: Completer,
+        sql_completer: "BigQueryCompleter",
+        keyword_completer: Completer,
+    ) -> None:
         self.repl = repl
         self.python_completer = python_completer
         self.sql_completer = sql_completer
+        self.keyword_completer = keyword_completer
+        self._source_context_re = re.compile(
+            r"\b(FROM|JOIN|INTO|TABLE|TABLESAMPLE)\b", re.IGNORECASE
+        )
+        self._column_context_re = re.compile(
+            r"\b(SELECT|WHERE|ON|GROUP\s+BY|HAVING|QUALIFY|ORDER\s+BY)\b",
+            re.IGNORECASE,
+        )
+        self._table_after_source_re = re.compile(
+            r"\b(?:FROM|JOIN|INTO|TABLE|TABLESAMPLE)\s+([`A-Za-z0-9_\-\.]+)",
+            re.IGNORECASE,
+        )
+        self._column_token_re = re.compile(r"[A-Za-z0-9_\.]+$")
+
+    def _sql_context(self, document) -> str:
+        text = document.text_before_cursor
+        if not text:
+            return "default"
+        last_source = None
+        last_column = None
+        for last_source in self._source_context_re.finditer(text):
+            pass
+        for last_column in self._column_context_re.finditer(text):
+            pass
+        if last_source and (not last_column or last_source.end() > last_column.end()):
+            return "sources"
+        if last_column:
+            return "columns"
+        return "default"
+
+    def _last_table_path(self, document) -> str | None:
+        text = document.text_before_cursor
+        if not text:
+            return None
+        match = None
+        for match in self._table_after_source_re.finditer(text):
+            pass
+        if match:
+            return match.group(1)
+        return None
+
+    def _column_token(self, document) -> tuple[str, str]:
+        text = document.text_before_cursor
+        match = self._column_token_re.search(text)
+        token = match.group(0) if match else ""
+        if "." in token:
+            prefix, suffix = token.rsplit(".", 1)
+            return prefix, suffix
+        return "", token
 
     def get_completions(self, document, complete_event):
         if self.repl.prompt_style == "sql":
-            yield from self.sql_completer.get_completions(document, complete_event)
+            context = self._sql_context(document)
+            if context == "sources":
+                yield from self.sql_completer.get_completions(document, complete_event)
+                return
+            if context == "columns":
+                table_path = self._last_table_path(document)
+                if table_path:
+                    prefix, token = self._column_token(document)
+                    columns = self.sql_completer._columns_for_table_path(table_path)
+                    if token:
+                        for column in columns:
+                            if column.startswith(token):
+                                completion = f"{prefix}.{column}" if prefix else column
+                                yield Completion(completion, start_position=-len(token))
+                        return
+                    for column in columns:
+                        completion = f"{prefix}.{column}" if prefix else column
+                        yield Completion(completion, start_position=0)
+                    return
+            seen: set[str] = set()
+            for completion in self.keyword_completer.get_completions(document, complete_event):
+                if completion.text not in seen:
+                    seen.add(completion.text)
+                    yield completion
+            for completion in self.sql_completer.get_completions(document, complete_event):
+                if completion.text not in seen:
+                    seen.add(completion.text)
+                    yield completion
         else:
             yield from self.python_completer.get_completions(document, complete_event)
 
@@ -538,10 +742,12 @@ class MyRpl(PythonRepl):
         super().__init__(*args, **kwargs)
         self._python_completer = self.completer
         self._bq_completer = BigQueryCompleter(self)
+        self._keyword_completer = SQLKeywordCompleter(self, sqlkeywords)
         self.completer = SQLReplCompleter(
             repl=self,
             python_completer=self._python_completer,
             sql_completer=self._bq_completer,
+            keyword_completer=self._keyword_completer,
         )
         self.debug_mode = debug_mode
         self.async_loop = is_async
