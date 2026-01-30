@@ -5,6 +5,8 @@ from site import ENABLE_USER_SITE
 from pathlib import Path
 import sys
 import asyncio
+import re
+import time
 from datetime import datetime, date
 import contextlib
 import logging
@@ -16,6 +18,7 @@ from prompt_toolkit.key_binding.vi_state import InputMode
 from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
 import pyarrow as pa
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
 from prompt_toolkit.formatted_text import ANSI
@@ -284,6 +287,178 @@ class MyPrompt(PromptStyle):
         return HTML(f"<{color}>Result [{idx}]</{color}>: ")
 
 
+# BigQuery completion support for SQL prompt.
+class BigQueryCompleter(Completer):
+    _TOKEN_RE = re.compile(r"[`A-Za-z0-9_\-\.]+$")
+
+    def __init__(self, repl, cache_ttl_seconds: int = 600) -> None:
+        self.repl = repl
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._datasets_cache: tuple[float, list[str]] | None = None
+        self._tables_cache: dict[str, tuple[float, list[str]]] = {}
+        self._columns_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+
+    def _now(self) -> float:
+        return time.monotonic()
+
+    def _cache_is_fresh(self, cache_entry: tuple[float, list[str]] | None) -> bool:
+        if not cache_entry:
+            return False
+        return (self._now() - cache_entry[0]) < self.cache_ttl_seconds
+
+    def _ensure_client(self) -> bq.Client | None:
+        try:
+            if not self.repl.client:
+                self.repl.client, self.repl.dry_client = self.repl._get_bq_client()
+            return self.repl.client
+        except Exception as e:
+            log.debug("BigQuery client init failed: %s", e)
+            return None
+
+    def _get_datasets(self) -> list[str]:
+        if self._cache_is_fresh(self._datasets_cache):
+            return self._datasets_cache[1]
+        client = self._ensure_client()
+        if not client:
+            return []
+        try:
+            datasets = [d.dataset_id for d in client.list_datasets(self.repl.PROJECT_ID)]
+            datasets.sort()
+            self._datasets_cache = (self._now(), datasets)
+            return datasets
+        except Exception as e:
+            log.debug("BigQuery dataset listing failed: %s", e)
+            return []
+
+    def _get_tables(self, dataset_id: str) -> list[str]:
+        cached = self._tables_cache.get(dataset_id)
+        if self._cache_is_fresh(cached):
+            return cached[1]
+        client = self._ensure_client()
+        if not client:
+            return []
+        try:
+            dataset_ref = bq.DatasetReference(self.repl.PROJECT_ID, dataset_id)
+            tables = [t.table_id for t in client.list_tables(dataset_ref)]
+            tables.sort()
+            self._tables_cache[dataset_id] = (self._now(), tables)
+            return tables
+        except Exception as e:
+            log.debug("BigQuery table listing failed for %s: %s", dataset_id, e)
+            return []
+
+    def _get_columns(self, dataset_id: str, table_id: str) -> list[str]:
+        cache_key = (dataset_id, table_id)
+        cached = self._columns_cache.get(cache_key)
+        if self._cache_is_fresh(cached):
+            return cached[1]
+        client = self._ensure_client()
+        if not client:
+            return []
+        try:
+            table_ref = f"{self.repl.PROJECT_ID}.{dataset_id}.{table_id}"
+            table = client.get_table(table_ref)
+            columns = [field.name for field in table.schema]
+            columns.sort()
+            self._columns_cache[cache_key] = (self._now(), columns)
+            return columns
+        except Exception as e:
+            log.debug("BigQuery schema fetch failed for %s.%s: %s", dataset_id, table_id, e)
+            return []
+
+    def _extract_token(self, text: str) -> str:
+        match = self._TOKEN_RE.search(text)
+        return match.group(0) if match else ""
+
+    def _with_backticks(self, token: str, completion: str) -> str:
+        if token.startswith("`"):
+            return f"`{completion}`"
+        return completion
+
+    def _make_completion(self, token: str, completion: str) -> Completion:
+        return Completion(
+            self._with_backticks(token, completion),
+            start_position=-len(token),
+        )
+
+    def get_completions(self, document, complete_event):
+        if self.repl.prompt_style != "sql":
+            return
+
+        token = self._extract_token(document.text_before_cursor)
+        if not token:
+            return
+
+        raw = token.strip("`")
+        if not raw:
+            return
+
+        parts = raw.split(".")
+        if not parts:
+            return
+
+        current = parts[-1]
+        base_parts = parts[:-1]
+
+        # Single segment: suggest datasets (and project if it matches).
+        if len(base_parts) == 0:
+            if self.repl.PROJECT_ID.startswith(current):
+                yield self._make_completion(token, self.repl.PROJECT_ID)
+            for dataset in self._get_datasets():
+                if dataset.startswith(current):
+                    yield self._make_completion(token, dataset)
+            return
+
+        # "project." -> datasets; "dataset." -> tables.
+        if len(base_parts) == 1:
+            first = base_parts[0]
+            if first == self.repl.PROJECT_ID:
+                for dataset in self._get_datasets():
+                    if dataset.startswith(current):
+                        yield self._make_completion(token, f"{first}.{dataset}")
+            else:
+                for table in self._get_tables(first):
+                    if table.startswith(current):
+                        yield self._make_completion(token, f"{first}.{table}")
+            return
+
+        # "project.dataset." -> tables; "dataset.table." -> columns.
+        if len(base_parts) == 2:
+            first, second = base_parts
+            if first == self.repl.PROJECT_ID:
+                for table in self._get_tables(second):
+                    if table.startswith(current):
+                        yield self._make_completion(token, f"{first}.{second}.{table}")
+            else:
+                for column in self._get_columns(first, second):
+                    if column.startswith(current):
+                        yield self._make_completion(token, f"{first}.{second}.{column}")
+            return
+
+        # "project.dataset.table." -> columns.
+        if len(base_parts) == 3 and base_parts[0] == self.repl.PROJECT_ID:
+            _, dataset_id, table_id = base_parts
+            for column in self._get_columns(dataset_id, table_id):
+                if column.startswith(current):
+                    yield self._make_completion(
+                        token, f"{self.repl.PROJECT_ID}.{dataset_id}.{table_id}.{column}"
+                    )
+            return
+
+
+class SQLReplCompleter(Completer):
+    def __init__(self, repl, python_completer: Completer, sql_completer: Completer) -> None:
+        self.repl = repl
+        self.python_completer = python_completer
+        self.sql_completer = sql_completer
+
+    def get_completions(self, document, complete_event):
+        if self.repl.prompt_style == "sql":
+            yield from self.sql_completer.get_completions(document, complete_event)
+        else:
+            yield from self.python_completer.get_completions(document, complete_event)
+
+
 # def MyValidator(Validator):
 #
 #     @abstractmethod
@@ -361,6 +536,13 @@ class MyRpl(PythonRepl):
         kwargs["history_filename"] = os.environ["HOME"] + "/ptpython_history_sql"
         kwargs["_extra_toolbars"] = [status_bar(self)]
         super().__init__(*args, **kwargs)
+        self._python_completer = self.completer
+        self._bq_completer = BigQueryCompleter(self)
+        self.completer = SQLReplCompleter(
+            repl=self,
+            python_completer=self._python_completer,
+            sql_completer=self._bq_completer,
+        )
         self.debug_mode = debug_mode
         self.async_loop = is_async
         self.pipe_logs = pipe_logs
