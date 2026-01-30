@@ -9,8 +9,6 @@ from datetime import datetime, date
 import logging
 from tqdm import tqdm
 import db_dtypes
-from prompt_toolkit.filters import vi_navigation_mode, Condition
-from prompt_toolkit.key_binding.vi_state import InputMode
 from pygments.lexers.sql import GoogleSqlLexer
 from pygments.lexers.python import PythonLexer
 import pyarrow as pa
@@ -24,26 +22,25 @@ import ptpython
 from ptpython.repl import PythonRepl
 
 # from ptpython.ipython import InteractiveShellEmbed
+from sqlrepl.bigquery import BigQuerySession
 from sqlrepl.constants import SQL_KEYWORD_SET
-from sqlrepl.formatting import apply_jinja_params, format_fix
+from sqlrepl.formatting import format_fix
+from sqlrepl.keybindings import register_keybindings
 from sqlrepl.status_bar import status_bar
 from sqlrepl.style import mystyle
 from sqlrepl.ui import MyPrompt, printdf, showhelp
 import click
-from zoneinfo import ZoneInfo
 from rich import print, get_console, inspect as ins
 
 insm = lambda x: ins(x, methods=True)
 insa = lambda x: ins(x, all=True)
 from rich.console import Console
-from rich.syntax import Syntax
 from rich.pretty import pprint
 from rich.logging import RichHandler
 from rich.progress import track
 
 # from rich.markdown import Markdown
 import google.cloud.bigquery as bq
-import google.cloud.bigquery_storage as bqs
 from google.api_core.exceptions import GoogleAPICallError
 
 log = logging.getLogger()
@@ -84,12 +81,7 @@ bqtypes = {
 }
 
 
-
-
-
-
 # pretty.install()
-eastern = ZoneInfo("US/Eastern")
 
 os.environ["MANPAGER"] = "bat --language=py -p"
 os.environ["PAGER"] = "bat --language=py -p"
@@ -264,6 +256,7 @@ class MyRpl(PythonRepl):
         self.nvim = None
         self.dfs = []
         self.client = None
+        self.bq = BigQuerySession(self)
         self.PROJECT_ID = os.environ["PROJECT_ID"]
         self.DATASET_ID = os.environ["DATASET_ID"]
         # self.NVIM_LISTEN_ADDRESS = os.environ["NVIM_SOCK"]
@@ -279,50 +272,6 @@ class MyRpl(PythonRepl):
             self.kc.load_connection_file()
             self.kc.start_channels()
             self.prompt_style = "ipython"
-
-    def _get_bq_client(self) -> tuple[bq.Client, bq.Client]:
-
-        print("[blue]Connecting...", end=" ")
-
-        # Instantiating client does this step anyway so it doesnt add any extra time
-        from google.auth import default
-
-        credentials, _ = default()
-
-        default_dataset = bq.DatasetReference(self.PROJECT_ID, self.DATASET_ID)
-        default_config = bq.QueryJobConfig(
-            default_dataset=default_dataset, job_timeout_ms=600000  # 10 min timeout
-        )
-        dry_run_config = bq.QueryJobConfig(
-            default_dataset=default_dataset, dry_run=True, use_query_cache=False
-        )
-        client = bq.Client(
-            credentials=credentials,
-            default_query_job_config=default_config,
-        )
-        dry_client = bq.Client(
-            project=self.PROJECT_ID,
-            credentials=credentials,
-            default_query_job_config=dry_run_config,
-        )
-        print("[green]Done", end="\r")
-
-        if self.bq_storage_mode:
-            self.storage_client = bqs.BigQueryReadClient(credentials=credentials)
-
-        return client, dry_client
-
-    def _ensure_bq_clients(self) -> None:
-        if not self.client:
-            self.client, self.dry_client = self._get_bq_client()
-
-    def _normalize_table_name(self, tablename: str) -> str:
-        splittable = tablename.split(".")
-        if len(splittable) == 1:
-            tablename = self.PROJECT_ID + "." + self.DATASET_ID + "." + tablename
-        if len(splittable) == 2:
-            tablename = self.PROJECT_ID + "." + tablename
-        return apply_jinja_params(tablename)
 
     def _render_dataframe_preview(self, df: pd.DataFrame) -> None:
         rows, cols = df.shape
@@ -344,17 +293,6 @@ class MyRpl(PythonRepl):
         globals["df"] = df
         self.dfs.append(df)
         globals["dfs"] = self.dfs
-
-    def _print_query_estimate(self, query: str) -> str | None:
-        try:
-            query_job = self.dry_client.query(query)
-            bytes_billed = round((query_job.total_bytes_processed or 0) / 1e9, 3)
-            estmsg = f"Est {bytes_billed} GB"
-            self.c.print(f"[dim]{estmsg}", end="... ")
-            return estmsg
-        except Exception as e:
-            print(f"\n{e}")
-            return None
 
     def do_ipython(self, line: str):
         self.kc.execute(f"_console.width = {self.c.width}")
@@ -394,8 +332,8 @@ class MyRpl(PythonRepl):
             get_console().print_exception(show_locals=False, suppress=[ptpython], max_frames=10)
 
     def do_sql(self, query: str) -> object:
-        self._ensure_bq_clients()
-        estmsg = self._print_query_estimate(query)
+        self.bq.ensure_clients()
+        estmsg = self.bq.print_query_estimate(query)
         if not estmsg:
             return
         print("[green]Submitted[/]", end="\r")
@@ -420,7 +358,13 @@ class MyRpl(PythonRepl):
         bytes_billed = round((query_job.total_bytes_billed or 0) / 1e9, 3)
         if bytes_billed:
             color = "red" if bytes_billed >= 500 else "yellow" if bytes_billed >= 100 else "blue"
-        print(f"[dim]{estmsg} -> Done ([{color}]{bytes_billed}[/] GB)")
+        total_seconds = int((query_job.ended - query_job.started).total_seconds())
+        timestring = f"[dim]{total_seconds} secs"
+        mins, secs = divmod(total_seconds, 60)
+        if mins >= 1:
+            timecolor = "red" if mins >= 5 else "yellow" if mins >= 3 else "dim"
+            timestring = f"[{timecolor}]{mins} mins {secs} secs[/]"
+        self.c.print(f"[dim]{estmsg} --> {timestring} --> Done ([{color}]{bytes_billed}[/] GB)")
         # client.query_and_wait is also an option
         if is_select and res.total_rows:
             large_result = res.total_rows > 40000
@@ -454,18 +398,11 @@ class MyRpl(PythonRepl):
             return f"[bold][green]Finished[/]"
 
     def _checkrunning(self):
-        globals = self.get_globals()
-        self._ensure_bq_clients()
-        globals["bqjobs"] = self.bqjobs = list(self.client.list_jobs(max_results=20))
-        globals["running_jobs"] = self.running_jobs = list(
-            self.client.list_jobs(state_filter="running")
-        )
-        if self.running_jobs:
-            return "There are running jobs. Check `running_jobs`"
+        return self.bq.check_running()
 
     def handle_choice(self, filetype):
 
-        if filetype not in ["sql", "python","ipython"]:
+        if filetype not in ["sql", "python", "ipython"]:
             return
 
         if filetype == self.prompt_style:
@@ -475,56 +412,14 @@ class MyRpl(PythonRepl):
             self.prompt_style = "sql"
             self._lexer = PygmentsLexer(GoogleSqlLexer)
 
-        if filetype in ["python","ipython"]:
+        if filetype in ["python", "ipython"]:
             self.prompt_style = filetype
             self._lexer = PygmentsLexer(PythonLexer)
 
         return f"Mode: {self.prompt_style.upper()}"
 
     def lookup(self, tablename):
-        self._ensure_bq_clients()
-
-        print = self.c.print
-        t = self.client.get_table(self._normalize_table_name(tablename))
-        print(f"\n{t.reference}\n")
-        print(f"Type: {t.table_type}")
-        if viewquery := t.view_query:
-            try:
-                viewquery = (
-                    format_fix(t.view_query) if not "insight" in t.dataset_id else t.view_query
-                )
-            except KeyboardInterrupt:
-                print("\n[red]View query display cancelled\n")
-            highlighted = Syntax(viewquery, "googlesql", theme=self.style, line_numbers=True)
-            print("\n", highlighted, "\n")
-        else:
-            print(f"{t.num_rows} rows")
-        print("Columns")
-        colors = {
-            "NUMERIC": "yellow",
-            "FLOAT": "yellow",
-            "INTEGER": "yellow",
-            "STRING": "green",
-            # "BOOLEAN": "magenta",
-            "TIMESTAMP": "cyan",
-            "DATE": "cyan",
-        }
-        for col in t.schema:
-            color = colors.get(col.field_type, "reset")
-            print(f"[{color}]{col.name} {col.field_type}")
-
-        print("\n")
-
-        if t.modified:
-            modified = t.modified.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
-            print(f"Modified at: {modified}")
-        if t.created:
-            created = t.created.astimezone(eastern).strftime("%Y-%m-%d %I:%M:%S %p ET")
-            print(f"Created at: {created}")
-
-        globals = self.get_globals()
-        globals["t"] = t
-        print("\nTable object is globally assigned to `t` for exploration\n")
+        self.bq.lookup_table(tablename)
 
     def _accept_handler(self, buff):
         words = buff.text.strip().split()
@@ -558,8 +453,7 @@ class MyRpl(PythonRepl):
             return "Reset console"
 
         if line == "bqsession":
-            if not self.client:
-                self.client, self.dry_client = self._get_bq_client()
+            self.bq.ensure_clients()
             self.client.default_query_job_config.create_session = True
             session_id = self.client.query("SELECT 1").session_info.session_id
             self.client.default_query_job_config.connection_properties = [
@@ -671,109 +565,7 @@ def embed(
 
     repl.app.clipboard = OSCClipboard()
 
-    @repl.add_key_binding("E", filter=vi_navigation_mode)
-    def _(event) -> None:
-        event.current_buffer.cursor_position += (
-            event.current_buffer.document.get_end_of_line_position()
-        )
-
-    @repl.add_key_binding("f6")
-    def _(event) -> None:
-        repl.ipython_mode = not repl.ipython_mode
-        if repl.ipython_mode:
-            repl.handle_choice("ipython")
-        else:
-            repl.handle_choice("python")
-
-    @repl.add_key_binding("f7")
-    def _(event) -> None:
-        breakpoint()
-
-    @repl.add_key_binding("f8")
-    def _(event) -> None:
-        if repl.prompt_style == "python":
-            repl.handle_choice("sql")
-        else:
-            repl.handle_choice("python")
-
-    # To debug events do this ( if in the repl, do get_globals = globals )
-    # globals = get_globals()
-    # globals['event'] = event
-    # Then the event can be explored in the repl
-    # Slight modification of the default ctrl-c so that if there's no text it doesn't do anything
-    @repl.add_key_binding("c-c")
-    def _(event) -> None:
-        if event.app.current_buffer.text:
-            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
-
-    # overwrite this because I use it but never intend to cut text, and it's slow in ssh if xserver is connected
-    @repl.add_key_binding("x", filter=vi_navigation_mode)
-    def _(event) -> None:
-        event.current_buffer.delete()
-
-    # can also use "is_multiline" condition to make ] and [ work when not in multiline
-    # https://github.com/prompt-toolkit/ptpython/blob/5021832f76309755097b744f274c4e687a690b85/ptpython/key_bindings.py
-    @repl.add_key_binding("c-y")
-    def _(event) -> None:
-        os.system("tmux copy-mode")
-
-    @repl.add_key_binding("c-u")
-    def _(event) -> None:
-        os.system("tmux copy-mode")
-
-    def real_exit(event):
-        if repl.client:  # If there's a client, check for running jobs
-            try:
-                repl._checkrunning()
-                job_cnt = len(repl.running_jobs)
-                repl.c.print(f"\n\n[red]Cancelling [green]{job_cnt}[/] running [blue]BQ[/] jobs")
-                for job in repl.running_jobs:
-                    repl.client.cancel_job(job.job_id)
-            except Exception as e:
-                log.error(f"Error cancelling jobs: {e}")
-                # log.exception(e)
-        event.app.exit(exception=EOFError, style="class:exiting")
-
-    confirmation_visible = Condition(lambda: repl.show_exit_confirmation)
-
-    @repl.add_key_binding("y", filter=confirmation_visible)
-    @repl.add_key_binding("Y", filter=confirmation_visible)
-    @repl.add_key_binding("enter", filter=confirmation_visible)
-    @repl.add_key_binding("c-d", filter=confirmation_visible)
-    def _(event) -> None:
-        real_exit(event)
-
-    # press gf to go to the file under cursor
-    # '/Users/n856925/Documents/github/ptpython/ptpython/key_bindings.py'
-    @repl.add_key_binding("c-q", filter=vi_navigation_mode)
-    @repl.add_key_binding("c-d", filter=vi_navigation_mode)
-    def _(event) -> None:
-        if repl.confirm_exit:
-            # Show exit confirmation and focus it (focusing is important for
-            # making sure the default buffer key bindings are not active).
-            repl.show_exit_confirmation = True
-            repl.app.layout.focus(repl.ptpython_layout.exit_confirmation)
-        else:
-            real_exit(event)
-
-    @repl.add_key_binding("B", filter=vi_navigation_mode)
-    def _(event) -> None:
-        b = event.current_buffer
-        b.cursor_position += b.document.get_start_of_line_position(after_whitespace=True)
-
-    @repl.add_key_binding("c-space")
-    def _(event) -> None:
-        """
-        Accept suggestion.
-        """
-        b = event.current_buffer
-        suggestion = b.suggestion
-
-        if suggestion:
-            b.insert_text(suggestion.text)
-
-    if repl.vi_mode and repl.vi_start_in_navigation_mode:
-        repl.app.vi_state.input_mode = InputMode.NAVIGATION
+    register_keybindings(repl)
 
     if return_asyncio_coroutine:
 
