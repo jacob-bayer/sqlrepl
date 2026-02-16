@@ -17,6 +17,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit import print_formatted_text
 
 # from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+import pyperclip as pc
 from sqlrepl.osc_clipboard import OSCClipboard
 import ptpython
 from ptpython.repl import PythonRepl
@@ -511,7 +512,7 @@ class MyRpl(PythonRepl):
                         extra_lines=10,
                     )
                 return
-            elif isinstance(output, (list, dict, set)):
+            elif isinstance(output, (list, dict, set)) and len(output) > 100:
                 pprint(output, max_length=100)
                 return
             self.c.print(output)
